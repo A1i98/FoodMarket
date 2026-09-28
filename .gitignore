@@ -1,0 +1,39 @@
+# .NET build and test outputs
+**/bin/
+**/obj/
+**/TestResults/
+*.user
+*.suo
+*.rsuser
+*.trx
+*.coverage
+*.coveragexml
+coverage/
+
+# Editor and operating-system files
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Runtime configuration and secrets
+appsettings*.json
+!appsettings.example.json
+.env
+.env.*
+!.env.example
+*.pfx
+*.pem
+*.key
+
+# LiteDB / SQLite and runtime logs
+*.db
+*.db-*
+*.db-shm
+*.db-wal
+*.log
+logs/
+*.pid
