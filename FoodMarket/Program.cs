@@ -6,6 +6,17 @@ using Telegram.Bot;
 var options = File.Exists("appsettings.json")
     ? JsonSerializer.Deserialize<MarketOptions>(File.ReadAllText("appsettings.json"), new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new MarketOptions()
     : new MarketOptions();
+if (args is ["--check-db", ..] or ["--repair-db", ..])
+{
+    var path = args.Length > 1 ? args[1] : options.DatabasePath;
+    try
+    {
+        if (args[0] == "--repair-db") Console.WriteLine($"Backup: {DatabaseMaintenance.Repair(path)}");
+        foreach (var (name, count) in DatabaseMaintenance.Check(path)) Console.WriteLine($"{name}: {count}");
+    }
+    catch (Exception ex) { Console.Error.WriteLine($"Database check failed: {ex.Message}"); Environment.ExitCode = 1; }
+    return;
+}
 var token = Environment.GetEnvironmentVariable("BOT_TOKEN");
 if (string.IsNullOrWhiteSpace(token)) token = options.BotToken;
 if (string.IsNullOrWhiteSpace(token))
@@ -15,6 +26,18 @@ if (string.IsNullOrWhiteSpace(token))
     return;
 }
 
+FileStream appLock;
+try
+{
+    appLock = new FileStream(Path.GetFullPath(options.DatabasePath) + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+}
+catch (IOException)
+{
+    Console.Error.WriteLine("Another instance is already using this database. Stop it before starting the bot.");
+    Environment.ExitCode = 1;
+    return;
+}
+using var instanceLock = appLock;
 using var store = new MarketStore(options);
 var market = new Marketplace(store, options);
 IFoodListingParser parser = new RuleBasedPersianFoodListingParser(options, store.Locations);
