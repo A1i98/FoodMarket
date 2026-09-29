@@ -149,4 +149,38 @@ public sealed class MarketplaceTests
         Assert.Throws<InvalidOperationException>(() => market.ConfirmDelivery(transaction.Id, 1));
         Assert.NotEqual(transaction.Id, market.StartTransaction(ad.Id, 2).Id);
     }
+
+    [Fact]
+    public void Buyer_can_mark_request_fulfilled_only_without_a_pending_trade()
+    {
+        var options = new MarketOptions { DatabasePath = ":memory:" };
+        using var store = new MarketStore(options);
+        var market = new Marketplace(store, options);
+        store.Save(new MarketUser { Id = 1, Onboarded = true });
+        store.Save(new MarketUser { Id = 2, Onboarded = true });
+        var ad = market.Publish(Listing(1, ListingType.Buy, "قیمه"));
+        Assert.False(market.MarkFulfilled(ad.Id, 2));
+        var transaction = market.StartTransaction(ad.Id, 2);
+        Assert.False(market.MarkFulfilled(ad.Id, 1));
+        market.CancelTransaction(transaction.Id, 1);
+        Assert.True(market.MarkFulfilled(ad.Id, 1));
+        Assert.Equal(ListingStatus.Sold, store.Ad(ad.Id)?.Status);
+        Assert.False(market.MarkFulfilled(ad.Id, 1));
+    }
+
+    [Fact]
+    public void Owner_can_mark_a_priceless_sale_sold_once()
+    {
+        var (store, market) = Setup();
+        using (store)
+        {
+            var ad = market.Publish(Listing(1, ListingType.Sell, "قیمه"));
+            Assert.Null(ad.Price);
+            Assert.False(market.MarkSold(ad.Id, 2));
+            Assert.Equal(ListingStatus.Active, store.Ad(ad.Id)?.Status);
+            Assert.True(market.MarkSold(ad.Id, 1));
+            Assert.Equal(ListingStatus.Sold, store.Ad(ad.Id)?.Status);
+            Assert.False(market.MarkSold(ad.Id, 1));
+        }
+    }
 }

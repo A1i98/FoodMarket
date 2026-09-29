@@ -46,7 +46,6 @@ public interface IFoodListingParser
 public sealed class MarketOptions
 {
     public string? BotToken { get; set; }
-    public int BarePriceMultiplier { get; set; } = 1000;
     public string TimeZone { get; set; } = "Asia/Tehran";
     public TimeOnly BreakfastExpirationTime { get; set; } = new(10, 0);
     public TimeOnly LunchExpirationTime { get; set; } = new(16, 0);
@@ -133,6 +132,8 @@ public sealed class UserSession
     public string? EditingField { get; set; }
     public int? DuplicateId { get; set; }
     public string? SensitiveNumber { get; set; }
+    public int? PreviewMessageId { get; set; }
+    public string? InlineDraftToken { get; set; }
 }
 
 public sealed class SharedMessage
@@ -140,6 +141,7 @@ public sealed class SharedMessage
     public int Id { get; set; }
     public int AdvertisementId { get; set; }
     public string InlineMessageId { get; set; } = "";
+    public bool CompactInlineCard { get; set; }
     public long? GroupChatId { get; set; }
     public int? GroupMessageId { get; set; }
 }
@@ -157,6 +159,16 @@ public sealed class InlinePrefill
 {
     public string Id { get; set; } = "";
     public string Food { get; set; } = "";
+}
+
+public sealed class InlineDraftMessage
+{
+    public int Id { get; set; }
+    public long OwnerId { get; set; }
+    public string Token { get; set; } = "";
+    public string InlineMessageId { get; set; } = "";
+    public bool Finalized { get; set; }
+    public int? PublishedAdvertisementId { get; set; }
 }
 
 public sealed class ListingReport
@@ -192,7 +204,6 @@ public sealed class SupportMessage
 public sealed class RuntimeSettings
 {
     public int Id { get; set; } = 1;
-    public int BarePriceMultiplier { get; set; }
     public string TimeZone { get; set; } = "Asia/Tehran";
     public TimeOnly BreakfastExpirationTime { get; set; }
     public TimeOnly LunchExpirationTime { get; set; }

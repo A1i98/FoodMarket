@@ -3,6 +3,7 @@ using Telegram.Bot.Types.Enums;
 namespace FoodMarket;
 
 public enum GroupCommandResult { NotCommand, Unauthorized, Installed, Uninstalled }
+public enum InlineScope { None, PrivateListings, GroupPrivateLinks }
 
 public sealed class GroupAccess(MarketStore store, MarketOptions options, TimeProvider? clock = null)
 {
@@ -10,7 +11,12 @@ public sealed class GroupAccess(MarketStore store, MarketOptions options, TimePr
 
     public bool IsInstalled(long chatId) => store.Group(chatId)?.Active == true;
 
-    public static bool AllowsInline(ChatType? chatType) => chatType is ChatType.Private or ChatType.Sender;
+    public static InlineScope GetInlineScope(ChatType? chatType) => chatType switch
+    {
+        ChatType.Private or ChatType.Sender => InlineScope.PrivateListings,
+        ChatType.Group or ChatType.Supergroup => InlineScope.GroupPrivateLinks,
+        _ => InlineScope.None
+    };
 
     public void Deactivate(long chatId)
     {
@@ -20,10 +26,17 @@ public sealed class GroupAccess(MarketStore store, MarketOptions options, TimePr
         store.Save(group);
     }
 
-    public GroupCommandResult Handle(long actor, long chatId, ChatType chatType, string? title, string text)
+    public GroupCommandResult Handle(long actor, long chatId, ChatType chatType, string? title, string text, string? botUsername = null)
     {
         if (chatType is not (ChatType.Group or ChatType.Supergroup)) return GroupCommandResult.NotCommand;
         var command = PersianText.Normalize(text);
+        if (command.StartsWith('/') && command.Contains('@'))
+        {
+            var parts = command.Split('@', 2);
+            if (botUsername is null || !parts[1].Equals(botUsername, StringComparison.OrdinalIgnoreCase))
+                return GroupCommandResult.NotCommand;
+            command = parts[0];
+        }
         var install = command is "نصب" or "/نصب" or "/install";
         var uninstall = command is "حذف نصب" or "/حذف_نصب" or "/uninstall";
         if (!install && !uninstall) return GroupCommandResult.NotCommand;

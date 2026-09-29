@@ -24,6 +24,7 @@ public sealed class MarketStore : IDisposable
         _db.GetCollection<MarketTransaction>("transactions").EnsureIndex(t => t.Status);
         _db.GetCollection<SupportTicket>("tickets").EnsureIndex(t => t.UserId);
         _db.GetCollection<SupportMessage>("ticketMessages").EnsureIndex(m => m.TicketId);
+        _db.GetCollection<InlineDraftMessage>("inlineDraftMessages").EnsureIndex(m => m.OwnerId);
         if (_db.GetCollection<RuntimeSettings>("runtimeSettings").FindById(1) is { } settings)
             ApplySettings(settings, options);
         if (_db.GetCollection<Cafeteria>("cafeterias").Count() == 0)
@@ -96,6 +97,14 @@ public sealed class MarketStore : IDisposable
     public void Save(InstalledGroup group) { lock (_gate) _db.GetCollection<InstalledGroup>("installedGroups").Upsert(group); }
     public void Save(InlinePrefill prefill) { lock (_gate) _db.GetCollection<InlinePrefill>("prefills").Upsert(prefill); }
     public string? Prefill(string id) { lock (_gate) return _db.GetCollection<InlinePrefill>("prefills").FindById(id)?.Food; }
+    public void Save(InlineDraftMessage message) { lock (_gate) _db.GetCollection<InlineDraftMessage>("inlineDraftMessages").Insert(message); }
+    public void Update(InlineDraftMessage message) { lock (_gate) _db.GetCollection<InlineDraftMessage>("inlineDraftMessages").Update(message); }
+    public bool HasInlineDraftMessage(long ownerId, string inlineMessageId)
+    { lock (_gate) return _db.GetCollection<InlineDraftMessage>("inlineDraftMessages").Exists(m => m.OwnerId == ownerId && m.InlineMessageId == inlineMessageId); }
+    public IReadOnlyList<InlineDraftMessage> InlineDraftMessages(long ownerId, string token)
+    { lock (_gate) return _db.GetCollection<InlineDraftMessage>("inlineDraftMessages").Find(m => m.OwnerId == ownerId && m.Token == token && !m.Finalized).ToList(); }
+    public IReadOnlyList<InlineDraftMessage> UnsyncedPublishedInlineDrafts()
+    { lock (_gate) return _db.GetCollection<InlineDraftMessage>("inlineDraftMessages").Find(m => m.PublishedAdvertisementId != null && !m.Finalized).ToList(); }
     public void Save(ListingReport report) { lock (_gate) _db.GetCollection<ListingReport>("reports").Insert(report); }
     public ListingReport? Report(int id) { lock (_gate) return _db.GetCollection<ListingReport>("reports").FindById(id); }
     public ListingReport? OpenReport(int adId, long reporterId)
@@ -112,7 +121,7 @@ public sealed class MarketStore : IDisposable
     {
         lock (_gate) _db.GetCollection<RuntimeSettings>("runtimeSettings").Upsert(new RuntimeSettings
         {
-            BarePriceMultiplier = options.BarePriceMultiplier, TimeZone = options.TimeZone,
+            TimeZone = options.TimeZone,
             BreakfastExpirationTime = options.BreakfastExpirationTime, LunchExpirationTime = options.LunchExpirationTime,
             DinnerExpirationTime = options.DinnerExpirationTime, OtherExpirationTime = options.OtherExpirationTime,
             DuplicateWindowMinutes = options.DuplicateWindowMinutes, NotificationCooldownMinutes = options.NotificationCooldownMinutes
@@ -120,7 +129,6 @@ public sealed class MarketStore : IDisposable
     }
     private static void ApplySettings(RuntimeSettings value, MarketOptions options)
     {
-        options.BarePriceMultiplier = value.BarePriceMultiplier;
         options.TimeZone = value.TimeZone;
         options.BreakfastExpirationTime = value.BreakfastExpirationTime;
         options.LunchExpirationTime = value.LunchExpirationTime;
@@ -351,9 +359,15 @@ public sealed class Marketplace(MarketStore store, MarketOptions options, TimePr
     }
 
     public bool MarkSold(int adId, long owner)
+        => MarkCompleted(adId, owner, ListingType.Sell);
+
+    public bool MarkFulfilled(int adId, long owner)
+        => MarkCompleted(adId, owner, ListingType.Buy);
+
+    private bool MarkCompleted(int adId, long owner, ListingType type)
     {
         var ad = store.Ad(adId);
-        if (ad is null || ad.Type != ListingType.Sell || ad.OwnerId != owner || ad.Status != ListingStatus.Active ||
+        if (ad is null || ad.Type != type || ad.OwnerId != owner || ad.Status != ListingStatus.Active ||
             store.TransactionsForAd(adId).Any(t => t.Status == TransactionStatus.Pending)) return false;
         ad.Status = ListingStatus.Sold;
         store.Save(ad);

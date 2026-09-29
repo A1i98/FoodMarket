@@ -16,11 +16,15 @@ public sealed class GroupAccessTests
         Assert.False(groups.IsInstalled(-100123));
         Assert.Equal(GroupCommandResult.NotCommand, groups.Handle(54431851, -100123, ChatType.Private, "سلف", "نصب"));
         Assert.Equal(GroupCommandResult.NotCommand, groups.Handle(54431851, -100123, ChatType.Supergroup, "سلف", "نصب غذا"));
+        Assert.Equal(GroupCommandResult.Installed, groups.Handle(54431851, -100123, ChatType.Supergroup, "بازار سلف", "/install@MyFoodBot", "MyFoodBot"));
+        Assert.Equal(GroupCommandResult.NotCommand, groups.Handle(54431851, -100223, ChatType.Supergroup, "سلف", "/install@OtherBot", "MyFoodBot"));
         Assert.Equal(GroupCommandResult.Installed, groups.Handle(54431851, -100123, ChatType.Supergroup, "بازار سلف", "نصب"));
         Assert.True(groups.IsInstalled(-100123));
         Assert.Equal("بازار سلف", store.InstalledGroups().Single().Title);
         store.Save(new SharedMessage { AdvertisementId = 12, GroupChatId = -100123, GroupMessageId = 23 });
+        store.Save(new SharedMessage { AdvertisementId = 12, InlineMessageId = "inline-123", CompactInlineCard = true });
         Assert.Equal(23, store.SharesForGroup(-100123).Single().GroupMessageId);
+        Assert.True(store.Shares(12).Single(s => s.InlineMessageId == "inline-123").CompactInlineCard);
         Assert.Empty(store.SharesForGroup(-100999));
         Assert.False(groups.IsInstalled(-100999));
         Assert.Equal(GroupCommandResult.Uninstalled, groups.Handle(54431851, -100123, ChatType.Supergroup, "بازار سلف", "حذف نصب"));
@@ -32,12 +36,12 @@ public sealed class GroupAccessTests
     }
 
     [Fact]
-    public void Unknown_inline_group_cannot_bypass_installed_group_gate()
+    public void Inline_groups_only_receive_private_links()
     {
-        Assert.True(GroupAccess.AllowsInline(ChatType.Private));
-        Assert.True(GroupAccess.AllowsInline(ChatType.Sender));
-        Assert.False(GroupAccess.AllowsInline(ChatType.Group));
-        Assert.False(GroupAccess.AllowsInline(ChatType.Supergroup));
-        Assert.False(GroupAccess.AllowsInline(null));
+        Assert.Equal(InlineScope.PrivateListings, GroupAccess.GetInlineScope(ChatType.Private));
+        Assert.Equal(InlineScope.PrivateListings, GroupAccess.GetInlineScope(ChatType.Sender));
+        Assert.Equal(InlineScope.GroupPrivateLinks, GroupAccess.GetInlineScope(ChatType.Group));
+        Assert.Equal(InlineScope.GroupPrivateLinks, GroupAccess.GetInlineScope(ChatType.Supergroup));
+        Assert.Equal(InlineScope.None, GroupAccess.GetInlineScope(null));
     }
 }
