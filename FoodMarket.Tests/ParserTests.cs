@@ -24,7 +24,7 @@ public sealed class ParserTests
     }
 
     [Fact]
-    public void Bare_price_requires_confirmation()
+    public void Bare_price_means_thousands()
     {
         var r = Parse("#فروشی\nقیمه بانوان ۷۰");
         Assert.Equal(ListingType.Sell, r.ListingType.Value);
@@ -32,6 +32,26 @@ public sealed class ParserTests
         Assert.Equal(CafeteriaGender.Women, r.CafeteriaGender.Value);
         Assert.Equal(70000, r.Price.Value);
         Assert.True(r.PriceConfidence < 1);
+    }
+
+    [Theory]
+    [InlineData("فروشی قیمه آقایان ۱۰۰ تومن")]
+    [InlineData("#فروشی قیمه سلف اقایان امروز 100 تومان")]
+    [InlineData("فروشی قیمه ۱۰۰تومن")]
+    public async Task Explicit_price_unit_is_confident(string text)
+    {
+        var parsed = await Parser().ParseAsync(text, CancellationToken.None);
+        Assert.Equal(100000, parsed.Price.Value);
+        Assert.True(parsed.PriceConfidence >= .85);
+        Assert.DoesNotContain("نیاز به تأیید", InlineListingPreview.FormatCreation(ListingType.Sell, parsed));
+    }
+
+    [Fact]
+    public async Task Hundred_bare_means_hundred_thousand()
+    {
+        var parsed = await Parser().ParseAsync("فروشی قیمه آقایان ۱۰۰", CancellationToken.None);
+        Assert.Equal(100000, parsed.Price.Value);
+        Assert.DoesNotContain("نیاز به تأیید", InlineListingPreview.FormatCreation(ListingType.Sell, parsed));
     }
 
     [Fact]

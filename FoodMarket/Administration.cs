@@ -88,7 +88,6 @@ public sealed class Administration(MarketStore store, MarketOptions options)
             if (!int.TryParse(value, out var n)) return false;
             switch (key)
             {
-                case "price" when n is >= 1 and <= 100000: options.BarePriceMultiplier = n; break;
                 case "duplicate" when n is >= 1 and <= 1440: options.DuplicateWindowMinutes = n; break;
                 case "notification" when n is >= 1 and <= 1440: options.NotificationCooldownMinutes = n; break;
                 default: return false;

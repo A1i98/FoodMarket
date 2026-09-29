@@ -172,7 +172,7 @@ public sealed class RuleBasedPersianFoodListingParser(
             else if (explicitPrice || number.Length is 2 or 3 && parsed is >= 10 and <= 999)
             {
                 var thousands = number.Length <= 3 && parsed < 1000;
-                r.Price = new(thousands ? parsed * options.BarePriceMultiplier : parsed, explicitPrice ? .9 : .7, match.Value);
+                r.Price = new(thousands ? parsed * 1000 : parsed, explicitPrice ? .9 : .7, match.Value);
                 r.Numbers.Add(new(match.Value, NumberKind.PriceCandidate));
             }
             else r.Numbers.Add(new(match.Value, NumberKind.Unknown));

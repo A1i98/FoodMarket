@@ -76,20 +76,18 @@ public sealed class AdministrationTests
             using (var store = new MarketStore(options))
             {
                 var admin = new Administration(store, options);
-                Assert.False(admin.TryUpdateSetting("price", "0"));
+                Assert.False(admin.TryUpdateSetting("price", "2000"));
                 Assert.False(admin.TryUpdateSetting("lunch", "29:99"));
                 Assert.False(admin.TryUpdateSetting("timezone", "No/SuchZone"));
-                Assert.True(admin.TryUpdateSetting("price", "۲۰۰۰"));
                 Assert.True(admin.TryUpdateSetting("lunch", "17:30"));
                 Assert.True(admin.TryUpdateSetting("notification", "120"));
                 var parser = new RuleBasedPersianFoodListingParser(options, store.Locations);
                 var result = await parser.ParseAsync("فروشی قیمه ۸۰", CancellationToken.None);
-                Assert.Equal(160000, result.Price.Value);
+                Assert.Equal(80000, result.Price.Value);
             }
             var restarted = new MarketOptions { DatabasePath = path, AdminUserId = 99 };
             using (var store = new MarketStore(restarted))
             {
-                Assert.Equal(2000, restarted.BarePriceMultiplier);
                 Assert.Equal(new TimeOnly(17, 30), restarted.LunchExpirationTime);
                 Assert.Equal(120, restarted.NotificationCooldownMinutes);
                 Assert.Equal(99, restarted.AdminUserId);
