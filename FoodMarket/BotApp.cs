@@ -130,6 +130,10 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
     private static string ListingId(Advertisement ad) => $"#{(ad.Type == ListingType.Buy ? "B" : ad.Type == ListingType.Sell ? "F" : "E")}{ad.Id}";
     private string ListingId(int adId) => store.Ad(adId) is { } ad ? ListingId(ad) : $"#{adId}";
     private static string QuestionId(ListingQuestion question) => $"#Q{question.Id}";
+    private string? OwnerUsername(Advertisement ad) => store.User(ad.OwnerId) is { } user ? user.Username : ad.OwnerUsername;
+    private InlineKeyboardButton? IdProfileButton(Advertisement ad) =>
+        TelegramUserLink.IdUrl(ad.OwnerId, OwnerUsername(ad)) is { } url
+            ? InlineKeyboardButton.WithUrl($"👤 پیام به کاربر {ad.OwnerId}", url) : null;
     private static string Header(Advertisement ad) => ad.Type switch
     {
         ListingType.Sell => $"🍛 فروشی | {ad.FoodName ?? MealName(ad.Meal)}",
@@ -157,7 +161,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         if (ad.Price.HasValue) s.AppendLine($"💵 {(ad.Type == ListingType.Exchange ? "تفاوت قیمت: " : "")}{PriceName(ad.Price)}");
         else if (ad.Type != ListingType.Exchange) s.AppendLine("💵 قیمت: از آگهی‌دهنده بپرسید");
         s.AppendLine($"📅 {DateName(ad)}");
-        s.AppendLine($"👤 {(ad.OwnerUsername is null ? "کاربر" : "@" + ad.OwnerUsername)}");
+        s.AppendLine($"👤 {TelegramUserLink.Display(ad.OwnerId, OwnerUsername(ad))}");
         if (user is not null) s.AppendLine($"⭐ {(user.Rating == 0 ? "بدون امتیاز" : user.Rating.ToString("0.0"))} | 🛡 {user.TrustScore}/100 | ✅ {user.SuccessfulTransactions} معامله");
         s.Append($"🆔 {ListingId(ad)}");
         return s.ToString();
@@ -189,7 +193,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         if (ad.Price.HasValue) lines.Add($"💵 {PriceName(ad.Price)}");
         else if (ad.Type != ListingType.Exchange) lines.Add("💵 قیمت: از آگهی‌دهنده بپرسید");
         if (ad.Date.HasValue || ad.DateRange is not null) lines.Add($"📅 {DateName(ad)}");
-        if (user is not null) lines.Add($"👤 {(ad.OwnerUsername is null ? "کاربر" : "@" + ad.OwnerUsername)} · ⭐ {(user.Rating == 0 ? "بدون امتیاز" : user.Rating.ToString("0.0"))} · 🛡 {user.TrustScore}/100");
+        if (user is not null) lines.Add($"👤 {TelegramUserLink.Display(ad.OwnerId, OwnerUsername(ad))} · ⭐ {(user.Rating == 0 ? "بدون امتیاز" : user.Rating.ToString("0.0"))} · 🛡 {user.TrustScore}/100");
         lines.Add($"🆔 {ListingId(ad)}");
         if (ad.Status == ListingStatus.Sold) return ListingCardStatus.Completed(string.Join("\n", lines), ad.Type);
         if (user?.Suspended == true && ad.Status == ListingStatus.Active) return ListingCardStatus.Suspended(string.Join("\n", lines));
@@ -206,6 +210,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
                 Link(ad.Type == ListingType.Exchange ? "🔄 پیشنهاد معاوضه" : ad.Type == ListingType.Buy ? "💰 پیشنهاد فروش" : "🛒 خرید", $"deal_{ad.Id}") },
             new[] { Link("⭐ اعتبار کاربر", $"profile_{ad.OwnerId}") }
         };
+        if (IdProfileButton(ad) is { } contact) rows.Add([contact]);
         if (viewerId is null || viewerId == ad.OwnerId)
         {
             if (ad.Type == ListingType.Sell) rows.Add([C("✅ فروخته شد", $"{(compact ? "soldc" : "sold")}_{ad.Id}"), Link("🚨 گزارش", $"report_{ad.Id}")]);
@@ -221,6 +226,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
     {
         var completed = store.TransactionsForAd(ad.Id).FirstOrDefault(t => t.Status == TransactionStatus.Completed);
         var rows = new List<InlineKeyboardButton[]> { new[] { Link("⭐ اعتبار کاربر", $"profile_{ad.OwnerId}"), Link("🚨 گزارش", $"report_{ad.Id}") } };
+        if (IdProfileButton(ad) is { } contact) rows.Add([contact]);
         if (completed is not null) rows.Add([Link("⭐ امتیاز به طرف معامله", $"review_{completed.Id}")]);
         return new InlineKeyboardMarkup(rows);
     }
@@ -696,7 +702,10 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         if (parameter.StartsWith("profile_", StringComparison.Ordinal) && long.TryParse(parameter[8..], out var userId))
         {
             var profile = store.User(userId);
-            await bot.SendMessage(id, profile is null ? "کاربر پیدا نشد." : $"👤 @{profile.Username ?? "کاربر"}\n⭐ {profile.Rating:0.0} | 🛡 {profile.TrustScore}/100\n✅ {profile.SuccessfulTransactions} معامله موفق", cancellationToken: ct);
+            var contact = profile is null ? null : TelegramUserLink.IdUrl(profile.Id, profile.Username);
+            await bot.SendMessage(id, profile is null ? "کاربر پیدا نشد." : $"👤 {TelegramUserLink.Display(profile.Id, profile.Username)}\n⭐ {profile.Rating:0.0} | 🛡 {profile.TrustScore}/100\n✅ {profile.SuccessfulTransactions} معامله موفق",
+                replyMarkup: contact is null ? null : new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithUrl("👤 باز کردن گفتگوی کاربر", contact) } }),
+                cancellationToken: ct);
             return;
         }
         if (parameter.StartsWith("report_", StringComparison.Ordinal) && int.TryParse(parameter[7..], out var reportId) && store.Ad(reportId) is not null)
@@ -1455,7 +1464,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         var users = store.Users();
         page = Math.Clamp(page, 0, Math.Max(0, (users.Count - 1) / 8));
         var rows = users.Skip(page * 8).Take(8).Select(u => new[]
-        { C($"{(u.Suspended ? "⛔" : "👤")} {u.Id} · @{u.Username ?? "بدون‌نام"}", $"adm_user_{u.Id}") }).ToList();
+        { C($"{(u.Suspended ? "⛔" : "👤")} {u.Id} · {TelegramUserLink.Display(u.Id, u.Username)}", $"adm_user_{u.Id}") }).ToList();
         var navigation = new List<InlineKeyboardButton>();
         if (page > 0) navigation.Add(C("⬅️ قبلی", $"adm_users_{page - 1}"));
         if ((page + 1) * 8 < users.Count) navigation.Add(C("بعدی ➡️", $"adm_users_{page + 1}"));
@@ -1478,7 +1487,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         if (userId != options.AdminUserId)
             rows.Insert(0, [C(user.Suspended ? "✅ رفع محدودیت" : "⛔ محدودسازی حساب",
                 user.Suspended ? $"adm_restore_{userId}" : $"adm_suspendask_{userId}")]);
-        await bot.SendMessage(id, $"👤 کاربر {userId} | @{user.Username ?? "بدون‌نام"}\n" +
+        await bot.SendMessage(id, $"👤 {TelegramUserLink.Display(userId, user.Username)}\n" +
             $"وضعیت: {(user.Suspended ? "⛔ محدود" : "✅ فعال")} | اعتبار: {user.TrustScore}/100 | امتیاز: {user.Rating:0.0}\n" +
             $"آگهی‌ها: {ads.Count} (فعال: {ads.Count(a => a.Status == ListingStatus.Active)}) | تیکت‌ها: {store.TicketsFor(userId).Count} | گزارش تخلف تأییدشده: {user.ConfirmedReports}",
             replyMarkup: new InlineKeyboardMarkup(rows), cancellationToken: ct);
