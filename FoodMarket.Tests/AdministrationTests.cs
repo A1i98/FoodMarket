@@ -164,4 +164,78 @@ public sealed class AdministrationTests
         var parser = new RuleBasedPersianFoodListingParser(options, store.Locations);
         Assert.Contains(market.Search(await parser.ParseAsync("ساندویچ", CancellationToken.None)), a => a.Id == second.Id);
     }
+
+    [Fact]
+    public void Admin_rating_and_trust_adjustment_remain_distinct_from_trade_votes()
+    {
+        var options = new MarketOptions { DatabasePath = ":memory:", AdminUserId = 9 };
+        using var store = new MarketStore(options);
+        var market = new Marketplace(store, options);
+        var admin = new Administration(store, options);
+        store.Save(new MarketUser { Id = 1, Onboarded = true });
+        store.Save(new MarketUser { Id = 2, Onboarded = true });
+        store.Save(new MarketUser { Id = 9, Onboarded = true });
+
+        Assert.False(admin.SetManualRating(2, 1, 5));
+        Assert.False(admin.SetManualRating(9, 9, 5));
+        Assert.False(admin.SetManualRating(9, 1, 6));
+        Assert.True(admin.SetManualRating(9, 1, 5));
+        Assert.Equal(5, store.User(1)?.EffectiveRating);
+        Assert.Equal(0, store.User(1)?.Rating);
+        Assert.Equal(70, store.User(1)?.TrustScore);
+        Assert.False(admin.AdjustTrust(2, 1, 10, "رفتار خوب"));
+        Assert.False(admin.AdjustTrust(9, 9, 10, "رفتار خوب"));
+        Assert.False(admin.AdjustTrust(9, 1, 31, "رفتار خوب"));
+        Assert.False(admin.AdjustTrust(9, 1, 0, "رفتار خوب"));
+        Assert.False(admin.AdjustTrust(9, 1, 10, "x"));
+        Assert.True(admin.AdjustTrust(9, 1, 10, "معاملهٔ موفق"));
+        Assert.Equal(80, store.User(1)?.TrustScore);
+
+        var ad = market.Publish(new Advertisement { OwnerId = 1, Type = ListingType.Sell, FoodName = "قیمه",
+            Date = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTime.UtcNow.AddDays(1), TimeZoneInfo.FindSystemTimeZoneById(options.TimeZone))) });
+        var trade = market.StartTransaction(ad.Id, 2);
+        market.ConfirmDelivery(trade.Id, 1);
+        market.ConfirmDelivery(trade.Id, 2);
+        Assert.True(market.Rate(trade.Id, 2, 1));
+        Assert.Equal(1, store.User(1)?.Rating); // Real transaction vote is preserved.
+        Assert.Equal(5, store.User(1)?.EffectiveRating);
+        Assert.Equal(82, store.User(1)?.TrustScore); // Manual +10 survives recalculation.
+        Assert.Contains(store.AdminAudits(), e => e.Action == "user_trust_adjust" && e.Detail!.Contains("معاملهٔ موفق"));
+        Assert.True(admin.SetManualRating(9, 1, null));
+        Assert.Equal(1, store.User(1)?.EffectiveRating);
+        Assert.Equal(42, store.User(1)?.TrustScore);
+        Assert.False(admin.SetManualRating(9, 1, null));
+    }
+
+    [Fact]
+    public void Ban_reason_and_manual_points_survive_restart()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"foodmarket-moderation-{Guid.NewGuid():N}.db");
+        try
+        {
+            var options = new MarketOptions { DatabasePath = path, AdminUserId = 9 };
+            using (var store = new MarketStore(options))
+            {
+                store.Save(new MarketUser { Id = 1, Onboarded = true });
+                var admin = new Administration(store, options);
+                Assert.True(admin.SetUserSuspended(9, 1, true, "نقض قوانین گروه"));
+                Assert.False(admin.SetUserSuspended(9, 1, true, "تکراری"));
+                Assert.True(admin.AdjustTrust(9, 1, -15, "نقض قوانین گروه"));
+                Assert.True(admin.SetManualRating(9, 1, 4));
+            }
+            using (var store = new MarketStore(options))
+            {
+                Assert.True(store.User(1)?.Suspended);
+                Assert.Equal("نقض قوانین گروه", store.User(1)?.SuspensionReason);
+                Assert.Equal(45, store.User(1)?.TrustScore);
+                Assert.Equal(-15, store.User(1)?.ManualTrustAdjustment);
+                Assert.Equal(4, store.User(1)?.ManualRating);
+                Assert.Equal(4, store.User(1)?.EffectiveRating);
+                Assert.Contains(store.AdminAudits(), e => e.Action == "user_suspend" && e.Detail == "نقض قوانین گروه");
+                Assert.True(new Administration(store, options).SetUserSuspended(9, 1, false));
+                Assert.Null(store.User(1)?.SuspensionReason);
+            }
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
 }

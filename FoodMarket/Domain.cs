@@ -99,9 +99,13 @@ public sealed class MarketUser
     public int ConfirmedReports { get; set; }
     public int TrustScore { get; set; } = 50;
     public double Rating { get; set; }
+    public int? ManualRating { get; set; }
+    public int ManualTrustAdjustment { get; set; }
+    public double EffectiveRating => ManualRating ?? Rating;
     public DateTime? LastNotificationUtc { get; set; }
     public bool NotificationsEnabled { get; set; } = true;
     public bool Suspended { get; set; }
+    public string? SuspensionReason { get; set; }
 }
 
 public sealed class AdminAuditEvent

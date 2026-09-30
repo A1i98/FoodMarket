@@ -162,7 +162,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         else if (ad.Type != ListingType.Exchange) s.AppendLine("💵 قیمت: از آگهی‌دهنده بپرسید");
         s.AppendLine($"📅 {DateName(ad)}");
         s.AppendLine($"👤 {TelegramUserLink.Display(ad.OwnerId, OwnerUsername(ad))}");
-        if (user is not null) s.AppendLine($"⭐ {(user.Rating == 0 ? "بدون امتیاز" : user.Rating.ToString("0.0"))} | 🛡 {user.TrustScore}/100 | ✅ {user.SuccessfulTransactions} معامله");
+        if (user is not null) s.AppendLine($"⭐ {(user.EffectiveRating == 0 ? "بدون امتیاز" : user.EffectiveRating.ToString("0.0"))}{(user.ManualRating.HasValue ? " (مدیریتی)" : "")} | 🛡 {user.TrustScore}/100 | ✅ {user.SuccessfulTransactions} معامله");
         s.Append($"🆔 {ListingId(ad)}");
         return s.ToString();
     }
@@ -193,7 +193,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         if (ad.Price.HasValue) lines.Add($"💵 {PriceName(ad.Price)}");
         else if (ad.Type != ListingType.Exchange) lines.Add("💵 قیمت: از آگهی‌دهنده بپرسید");
         if (ad.Date.HasValue || ad.DateRange is not null) lines.Add($"📅 {DateName(ad)}");
-        if (user is not null) lines.Add($"👤 {TelegramUserLink.Display(ad.OwnerId, OwnerUsername(ad))} · ⭐ {(user.Rating == 0 ? "بدون امتیاز" : user.Rating.ToString("0.0"))} · 🛡 {user.TrustScore}/100");
+        if (user is not null) lines.Add($"👤 {TelegramUserLink.Display(ad.OwnerId, OwnerUsername(ad))} · ⭐ {(user.EffectiveRating == 0 ? "بدون امتیاز" : user.EffectiveRating.ToString("0.0"))}{(user.ManualRating.HasValue ? " مدیریتی" : "")} · 🛡 {user.TrustScore}/100");
         lines.Add($"🆔 {ListingId(ad)}");
         if (ad.Status == ListingStatus.Sold) return ListingCardStatus.Completed(string.Join("\n", lines), ad.Type);
         if (user?.Suspended == true && ad.Status == ListingStatus.Active) return ListingCardStatus.Suspended(string.Join("\n", lines));
@@ -703,7 +703,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         {
             var profile = store.User(userId);
             var contact = profile is null ? null : TelegramUserLink.IdUrl(profile.Id, profile.Username);
-            await bot.SendMessage(id, profile is null ? "کاربر پیدا نشد." : $"👤 {TelegramUserLink.Display(profile.Id, profile.Username)}\n⭐ {profile.Rating:0.0} | 🛡 {profile.TrustScore}/100\n✅ {profile.SuccessfulTransactions} معامله موفق",
+            await bot.SendMessage(id, profile is null ? "کاربر پیدا نشد." : $"👤 {TelegramUserLink.Display(profile.Id, profile.Username)}\n⭐ {profile.EffectiveRating:0.0}{(profile.ManualRating.HasValue ? " (مدیریتی)" : "")} | 🛡 {profile.TrustScore}/100\n✅ {profile.SuccessfulTransactions} معامله موفق",
                 replyMarkup: contact is null ? null : new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithUrl("👤 باز کردن گفتگوی کاربر", contact) } }),
                 cancellationToken: ct);
             return;
@@ -1385,7 +1385,9 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         page = Math.Clamp(page, 0, Math.Max(0, (events.Count - 1) / 10));
         var names = new Dictionary<string, string>
         {
-            ["user_suspend"] = "محدودسازی کاربر", ["user_restore"] = "رفع محدودیت کاربر",
+            ["user_suspend"] = "بن کاربر", ["user_restore"] = "رفع بن کاربر",
+            ["user_rate_set"] = "امتیاز مدیریتی", ["user_rate_clear"] = "حذف امتیاز مدیریتی",
+            ["user_trust_adjust"] = "تغییر دستی اعتبار",
             ["group_install"] = "نصب گروه", ["group_uninstall"] = "حذف نصب از گروه",
             ["group_disable"] = "غیرفعال‌سازی گروه", ["ad_disable"] = "غیرفعال‌سازی آگهی",
             ["report_resolve"] = "رسیدگی به گزارش", ["report_dismiss"] = "رد گزارش",
@@ -1485,12 +1487,23 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
             new[] { C("↩️ کاربران", "adm_users_0") }
         };
         if (userId != options.AdminUserId)
-            rows.Insert(0, [C(user.Suspended ? "✅ رفع محدودیت" : "⛔ محدودسازی حساب",
-                user.Suspended ? $"adm_restore_{userId}" : $"adm_suspendask_{userId}")]);
+        {
+            rows.Insert(0, [C("⭐ امتیاز مدیریتی", $"adm_rate_{userId}"), C("🛡 تغییر اعتبار", $"adm_trust_{userId}")]);
+            rows.Insert(0, [C(user.Suspended ? "✅ رفع بن" : "⛔ بن کاربر",
+                user.Suspended ? $"adm_restoreask_{userId}" : $"adm_suspendask_{userId}")]);
+        }
         await bot.SendMessage(id, $"👤 {TelegramUserLink.Display(userId, user.Username)}\n" +
-            $"وضعیت: {(user.Suspended ? "⛔ محدود" : "✅ فعال")} | اعتبار: {user.TrustScore}/100 | امتیاز: {user.Rating:0.0}\n" +
+            $"وضعیت: {(user.Suspended ? "⛔ بن‌شده" : "✅ فعال")}{(user.Suspended && user.SuspensionReason is { } reason ? $" | دلیل: {reason}" : "")}\n" +
+            $"🛡 اعتبار: {user.TrustScore}/100 (تعدیل دستی: {user.ManualTrustAdjustment:+#;-#;0}) | ⭐ امتیاز: {user.EffectiveRating:0.0}" +
+            (user.ManualRating.HasValue ? $" (مدیریتی؛ میانگین معاملات: {user.Rating:0.0})" : "") + "\n" +
             $"آگهی‌ها: {ads.Count} (فعال: {ads.Count(a => a.Status == ListingStatus.Active)}) | تیکت‌ها: {store.TicketsFor(userId).Count} | گزارش تخلف تأییدشده: {user.ConfirmedReports}",
             replyMarkup: new InlineKeyboardMarkup(rows), cancellationToken: ct);
+    }
+
+    private async Task RefreshUserCards(long userId, CancellationToken ct)
+    {
+        foreach (var ad in store.AdsFor(userId).Where(a => a.Status is ListingStatus.Active or ListingStatus.Sold))
+            await EditShares(ad.Id, ct);
     }
 
     private async Task CafeteriaMenu(long id, int page, CancellationToken ct)
@@ -1593,6 +1606,33 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
             session.EditingField = null; store.Save(session);
             await AdminUserDetails(id, userId, ct); return true;
         }
+        if (field.StartsWith("banreason:", StringComparison.Ordinal) && long.TryParse(field[10..], out var banUserId))
+        {
+            var reason = text.Trim();
+            if (reason.Length is < 3 or > 160 || store.User(banUserId) is not { Suspended: false })
+            { await bot.SendMessage(id, "دلیل بن باید ۳ تا ۱۶۰ نویسه باشد و حساب کاربر فعال باشد. برای خروج /cancel را بزن.", cancellationToken: ct); return true; }
+            session.EditingField = $"banconfirm:{banUserId}:{reason}"; store.Save(session);
+            await bot.SendMessage(id, $"⛔ حساب کاربر {banUserId} بن شود؟\nدلیل: {reason}\nآگهی‌هایش پنهان می‌شوند؛ معاملات جاری قابل تکمیل می‌مانند.",
+                replyMarkup: new InlineKeyboardMarkup(new[] { new[] { C("⛔ تأیید بن", $"adm_suspend_{banUserId}"), C("↩️ انصراف", $"adm_user_{banUserId}") } }), cancellationToken: ct);
+            return true;
+        }
+        if (field.StartsWith("trustinput:", StringComparison.Ordinal) && long.TryParse(field[11..], out var trustUserId))
+        {
+            var parts = PersianText.Normalize(text).Split(' ', 2, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length != 2 || !int.TryParse(parts[0], out var delta) || delta is < -30 or > 30 or 0 ||
+                parts[1].Length is < 3 or > 160 || store.User(trustUserId) is not { } target ||
+                Math.Clamp(target.TrustScore + delta, 0, 100) == target.TrustScore)
+            { await bot.SendMessage(id, "فرمت: +۱۰ دلیل یا -۱۰ دلیل؛ تغییر هر بار حداکثر ۳۰ امتیاز است و نتیجه باید بین ۰ تا ۱۰۰ تغییر کند. برای خروج /cancel را بزن.", cancellationToken: ct); return true; }
+            session.EditingField = $"trustconfirm:{trustUserId}:{delta}:{parts[1]}"; store.Save(session);
+            await bot.SendMessage(id, $"🛡 اعتبار کاربر {trustUserId}: {target.TrustScore} → {Math.Clamp(target.TrustScore + delta, 0, 100)}\nدلیل: {parts[1]}",
+                replyMarkup: new InlineKeyboardMarkup(new[] { new[] { C("✅ ثبت تغییر اعتبار", $"adm_trustsave_{trustUserId}"), C("↩️ انصراف", $"adm_user_{trustUserId}") } }), cancellationToken: ct);
+            return true;
+        }
+        if (field.StartsWith("banconfirm:", StringComparison.Ordinal) || field.StartsWith("trustconfirm:", StringComparison.Ordinal))
+        {
+            await bot.SendMessage(id, "برای ثبت، دکمهٔ تأیید پیام قبلی را بزن یا با /cancel منصرف شو.", cancellationToken: ct);
+            return true;
+        }
         if (field == "caf_add")
         {
             if (!_admin.AddCafeteria(text)) { await bot.SendMessage(id, "نام محل باید بین ۲ تا ۶۰ نویسه باشد.", cancellationToken: ct); return true; }
@@ -1656,28 +1696,106 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
             session.EditingField = "adminuserlookup"; store.Save(session);
             await bot.SendMessage(id, "شناسهٔ عددی کاربر را بفرست (برای خروج /cancel).", cancellationToken: ct); return true;
         }
+        if (data.StartsWith("adm_rateclearask_", StringComparison.Ordinal) && long.TryParse(data[17..], out var clearAskId))
+        {
+            await bot.SendMessage(id, $"امتیاز مدیریتی کاربر {clearAskId} حذف و امتیاز حاصل از معاملات دوباره نمایش داده شود؟",
+                replyMarkup: new InlineKeyboardMarkup(new[] { new[] { C("✅ حذف امتیاز دستی", $"adm_rateclear_{clearAskId}"), C("↩️ انصراف", $"adm_user_{clearAskId}") } }), cancellationToken: ct);
+            return true;
+        }
+        if (data.StartsWith("adm_rateclear_", StringComparison.Ordinal) && long.TryParse(data[14..], out var clearId))
+        {
+            if (!_admin.SetManualRating(id, clearId, null))
+            { await bot.SendMessage(id, "حذف امتیاز دستی مجاز نیست یا امتیاز دستی وجود ندارد.", cancellationToken: ct); return true; }
+            await RefreshUserCards(clearId, ct);
+            await AdminUserDetails(id, clearId, ct);
+            try { await bot.SendMessage(clearId, "⭐ امتیاز مدیریتی شما حذف شد؛ امتیاز حاصل از معاملات نمایش داده می‌شود.", cancellationToken: ct); }
+            catch (Exception ex) { Log(ex); }
+            return true;
+        }
+        if (data.StartsWith("adm_rateask_", StringComparison.Ordinal) &&
+            data[12..].Split('_') is [var rateTarget, var rateValue] && long.TryParse(rateTarget, out var askRateId) &&
+            int.TryParse(rateValue, out var askStars) && askStars is >= 1 and <= 5)
+        {
+            await bot.SendMessage(id, $"⭐ امتیاز مدیریتی {askStars} از ۵ برای کاربر {askRateId} ثبت شود؟ این امتیاز جدا از آرای معاملات نگه داشته می‌شود.",
+                replyMarkup: new InlineKeyboardMarkup(new[] { new[] { C("✅ تأیید امتیاز", $"adm_rateset_{askRateId}_{askStars}"), C("↩️ انصراف", $"adm_user_{askRateId}") } }), cancellationToken: ct);
+            return true;
+        }
+        if (data.StartsWith("adm_rateset_", StringComparison.Ordinal) &&
+            data[12..].Split('_') is [var setTarget, var setValue] && long.TryParse(setTarget, out var ratedId) &&
+            int.TryParse(setValue, out var stars) && stars is >= 1 and <= 5)
+        {
+            if (!_admin.SetManualRating(id, ratedId, stars))
+            { await bot.SendMessage(id, "ثبت امتیاز مجاز نیست یا امتیاز تغییر نکرده است.", cancellationToken: ct); return true; }
+            await RefreshUserCards(ratedId, ct);
+            await AdminUserDetails(id, ratedId, ct);
+            try { await bot.SendMessage(ratedId, $"⭐ مدیر برای حساب شما امتیاز مدیریتی {stars} از ۵ ثبت کرد. برای پیگیری /support را بزنید.", cancellationToken: ct); }
+            catch (Exception ex) { Log(ex); }
+            return true;
+        }
+        if (data.StartsWith("adm_rate_", StringComparison.Ordinal) && long.TryParse(data[9..], out var rateUserId))
+        {
+            var user = store.User(rateUserId);
+            if (user is null || rateUserId == options.AdminUserId) return true;
+            var rows = new List<InlineKeyboardButton[]> { Enumerable.Range(1, 5).Select(star => C($"{star}⭐", $"adm_rateask_{rateUserId}_{star}")).ToArray() };
+            if (user.ManualRating.HasValue) rows.Add([C("🗑 حذف امتیاز مدیریتی", $"adm_rateclearask_{rateUserId}")]);
+            rows.Add([C("↩️ کاربر", $"adm_user_{rateUserId}")]);
+            await bot.SendMessage(id, $"⭐ امتیاز مدیریتی کاربر {rateUserId}\nامتیاز معاملات: {user.Rating:0.0} | امتیاز دستی: {(user.ManualRating.HasValue ? user.ManualRating.ToString() : "ثبت نشده")}",
+                replyMarkup: new InlineKeyboardMarkup(rows), cancellationToken: ct);
+            return true;
+        }
+        if (data.StartsWith("adm_trustsave_", StringComparison.Ordinal) && long.TryParse(data[14..], out var savedTrustId))
+        {
+            var values = session.EditingField?.Split(':', 4);
+            if (values is not ["trustconfirm", var targetId, var change, var reason] || !long.TryParse(targetId, out var pendingTrustUserId) ||
+                pendingTrustUserId != savedTrustId || !int.TryParse(change, out var delta) || !_admin.AdjustTrust(id, savedTrustId, delta, reason))
+            { await bot.SendMessage(id, "درخواست تغییر اعتبار معتبر نیست یا امتیاز تغییری نمی‌کند؛ دوباره از پروفایل کاربر شروع کن.", cancellationToken: ct); return true; }
+            session.EditingField = null; store.Save(session);
+            await RefreshUserCards(savedTrustId, ct);
+            await AdminUserDetails(id, savedTrustId, ct);
+            try { await bot.SendMessage(savedTrustId, $"🛡 اعتبار شما توسط مدیر به {store.User(savedTrustId)!.TrustScore}/100 تغییر کرد. برای پیگیری /support را بزنید.", cancellationToken: ct); }
+            catch (Exception ex) { Log(ex); }
+            return true;
+        }
+        if (data.StartsWith("adm_trust_", StringComparison.Ordinal) && long.TryParse(data[10..], out var trustId))
+        {
+            if (store.User(trustId) is null || trustId == options.AdminUserId) return true;
+            session.EditingField = $"trustinput:{trustId}"; store.Save(session);
+            await bot.SendMessage(id, $"🛡 تغییر اعتبار کاربر {trustId}: عدد دارای علامت و دلیل را بفرست؛ مثلاً «+۱۰ معاملهٔ موفق» یا «-۵ تخلف». حد هر بار ۳۰ امتیاز است. انصراف: /cancel", cancellationToken: ct);
+            return true;
+        }
         if (data.StartsWith("adm_suspendask_", StringComparison.Ordinal) && long.TryParse(data[15..], out var askUserId))
         {
-            await bot.SendMessage(id, $"حساب کاربر {askUserId} محدود شود؟ آگهی‌هایش از جست‌وجو پنهان می‌شوند؛ معاملات جاری را همچنان می‌تواند تکمیل کند.",
-                replyMarkup: new InlineKeyboardMarkup(new[] { new[] { C("⛔ تأیید محدودسازی", $"adm_suspend_{askUserId}"), C("↩️ انصراف", $"adm_user_{askUserId}") } }), cancellationToken: ct);
+            if (store.User(askUserId) is not { Suspended: false } || askUserId == options.AdminUserId) return true;
+            session.EditingField = $"banreason:{askUserId}"; store.Save(session);
+            await bot.SendMessage(id, $"⛔ دلیل بن کاربر {askUserId} را در ۳ تا ۱۶۰ نویسه بنویس؛ پیش از اجرا تأیید جداگانه می‌گیری. انصراف: /cancel", cancellationToken: ct);
+            return true;
+        }
+        if (data.StartsWith("adm_restoreask_", StringComparison.Ordinal) && long.TryParse(data[15..], out var restoreAskId))
+        {
+            await bot.SendMessage(id, $"بن کاربر {restoreAskId} برداشته شود؟",
+                replyMarkup: new InlineKeyboardMarkup(new[] { new[] { C("✅ تأیید رفع بن", $"adm_restore_{restoreAskId}"), C("↩️ انصراف", $"adm_user_{restoreAskId}") } }), cancellationToken: ct);
             return true;
         }
         if (data.StartsWith("adm_suspend_", StringComparison.Ordinal) && long.TryParse(data[12..], out var suspendedId) ||
             data.StartsWith("adm_restore_", StringComparison.Ordinal) && long.TryParse(data[12..], out suspendedId))
         {
             var suspended = data.StartsWith("adm_suspend_", StringComparison.Ordinal);
-            if (!_admin.SetUserSuspended(id, suspendedId, suspended))
+            var pending = session.EditingField?.Split(':', 3);
+            var reason = suspended && pending is ["banconfirm", var pendingTarget, var pendingReason] &&
+                long.TryParse(pendingTarget, out var candidate) && candidate == suspendedId ? pendingReason : null;
+            if (suspended && reason is null || !_admin.SetUserSuspended(id, suspendedId, suspended, reason))
             { await bot.SendMessage(id, "تغییر وضعیت کاربر مجاز نیست.", cancellationToken: ct); return true; }
-            foreach (var ad in store.AdsFor(suspendedId).Where(a => a.Status == ListingStatus.Active)) await EditShares(ad.Id, ct);
+            session.EditingField = null; store.Save(session);
+            await RefreshUserCards(suspendedId, ct);
             await AdminUserDetails(id, suspendedId, ct);
             try { await bot.SendMessage(suspendedId, suspended
-                ? "⛔ حساب شما موقتاً محدود شد. برای پیگیری /support را بزنید. معاملات در جریان قابل تکمیل‌اند."
-                : "✅ محدودیت حساب شما برداشته شد.", cancellationToken: ct); }
+                ? $"⛔ حساب شما توسط مدیر بن شد. دلیل: {reason}\nبرای پیگیری /support را بزنید. معاملات در جریان قابل تکمیل‌اند."
+                : "✅ بن حساب شما برداشته شد.", cancellationToken: ct); }
             catch (Exception ex) { Log(ex); }
             return true;
         }
         if (data.StartsWith("adm_user_", StringComparison.Ordinal) && long.TryParse(data[9..], out var userDetailsId))
-        { await AdminUserDetails(id, userDetailsId, ct); return true; }
+        { session.EditingField = null; store.Save(session); await AdminUserDetails(id, userDetailsId, ct); return true; }
         if (data.StartsWith("adm_groups_", StringComparison.Ordinal) && int.TryParse(data[11..], out var groupPage))
         { await AdminGroups(id, groupPage, ct); return true; }
         if (data.StartsWith("adm_group_info_", StringComparison.Ordinal) && long.TryParse(data[15..], out var groupInfoId))

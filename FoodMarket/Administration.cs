@@ -62,13 +62,44 @@ public sealed class SupportService(MarketStore store, long adminUserId, TimeProv
 
 public sealed class Administration(MarketStore store, MarketOptions options)
 {
-    public bool SetUserSuspended(long actor, long userId, bool suspended)
+    public bool SetUserSuspended(long actor, long userId, bool suspended, string? reason = null)
     {
         if (options.AdminUserId <= 0 || actor != options.AdminUserId || userId == options.AdminUserId ||
-            store.User(userId) is not { } user) return false;
+            store.User(userId) is not { } user || user.Suspended == suspended || reason?.Length > 160) return false;
         user.Suspended = suspended;
+        user.SuspensionReason = suspended ? reason?.Trim() : null;
         store.Save(user);
-        store.Save(new AdminAuditEvent { ActorId = actor, Action = suspended ? "user_suspend" : "user_restore", TargetId = userId });
+        store.Save(new AdminAuditEvent { ActorId = actor, Action = suspended ? "user_suspend" : "user_restore", TargetId = userId,
+            Detail = suspended ? user.SuspensionReason : null });
+        return true;
+    }
+
+    public bool SetManualRating(long actor, long userId, int? stars)
+    {
+        if (options.AdminUserId <= 0 || actor != options.AdminUserId || userId == actor ||
+            store.User(userId) is not { } user || stars is < 1 or > 5 || user.ManualRating == stars) return false;
+        var previous = user.ManualRating;
+        user.ManualRating = stars;
+        user.TrustScore = Marketplace.CalculateTrust(user);
+        store.Save(user);
+        store.Save(new AdminAuditEvent { ActorId = actor, Action = stars.HasValue ? "user_rate_set" : "user_rate_clear",
+            TargetId = userId, Detail = $"{previous?.ToString() ?? "بدون امتیاز دستی"} → {stars?.ToString() ?? "حذف"}" });
+        return true;
+    }
+
+    public bool AdjustTrust(long actor, long userId, int delta, string reason)
+    {
+        reason = reason.Trim();
+        if (options.AdminUserId <= 0 || actor != options.AdminUserId || userId == actor ||
+            store.User(userId) is not { } user || delta is < -30 or > 30 or 0 || reason.Length is < 3 or > 160) return false;
+        var previous = user.TrustScore;
+        var next = Math.Clamp(previous + delta, 0, 100);
+        if (previous == next) return false;
+        user.ManualTrustAdjustment = next - Marketplace.CalculateBaseTrust(user);
+        user.TrustScore = next;
+        store.Save(user);
+        store.Save(new AdminAuditEvent { ActorId = actor, Action = "user_trust_adjust", TargetId = userId,
+            Detail = $"{previous} → {next} ({delta:+#;-#;0}) | {reason}" });
         return true;
     }
 

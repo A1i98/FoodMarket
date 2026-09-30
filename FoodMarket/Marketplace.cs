@@ -458,8 +458,10 @@ public sealed class Marketplace(MarketStore store, MarketOptions options, TimePr
         return true;
     }
 
-    private static int CalculateTrust(MarketUser user) => Math.Clamp(50 + Math.Min(25, user.SuccessfulTransactions * 2) +
-        (user.Rating == 0 ? 0 : (int)Math.Round((user.Rating - 3) * 10)) - user.ConfirmedReports * 10, 0, 100);
+    public static int CalculateBaseTrust(MarketUser user) => Math.Clamp(50 + Math.Min(25, user.SuccessfulTransactions * 2) +
+        (user.EffectiveRating == 0 ? 0 : (int)Math.Round((user.EffectiveRating - 3) * 10)) - user.ConfirmedReports * 10, 0, 100);
+
+    public static int CalculateTrust(MarketUser user) => Math.Clamp(CalculateBaseTrust(user) + user.ManualTrustAdjustment, 0, 100);
 
     public bool Rate(int transactionId, long raterId, int stars)
     {
