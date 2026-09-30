@@ -107,6 +107,8 @@ public sealed class MarketStore : IDisposable
     public void Save(InlineDraftMessage message) { lock (_gate) _db.GetCollection<InlineDraftMessage>("inlineDraftMessages").Insert(message); }
     public void Update(InlineDraftMessage message) { lock (_gate) _db.GetCollection<InlineDraftMessage>("inlineDraftMessages").Update(message); }
     public ListingQuestion? Question(int id) { lock (_gate) return _db.GetCollection<ListingQuestion>("listingQuestions").FindById(id); }
+    public ListingQuestion? QuestionByOwnerMessage(long ownerId, int messageId)
+    { lock (_gate) return _db.GetCollection<ListingQuestion>("listingQuestions").FindOne(q => q.OwnerId == ownerId && q.OwnerMessageId == messageId && q.Answer == null); }
     public IReadOnlyList<ListingQuestion> QuestionsForAd(int adId, long requester)
     { lock (_gate) return _db.GetCollection<ListingQuestion>("listingQuestions").Find(q => q.AdvertisementId == adId && q.RequesterId == requester).ToList(); }
     public IReadOnlyList<ListingQuestion> UnansweredQuestions(long owner)
@@ -325,7 +327,7 @@ public sealed class Marketplace(MarketStore store, MarketOptions options, TimePr
         return t;
     }
 
-    public ListingQuestion AskQuestion(int adId, long requester, string text)
+    public ListingQuestion AskQuestion(int adId, long requester, string text, int? messageId = null)
     {
         var ad = store.Ad(adId);
         text = text.Trim();
@@ -336,7 +338,7 @@ public sealed class Marketplace(MarketStore store, MarketOptions options, TimePr
         if (store.QuestionsForAd(adId, requester).Any(q => q.CreatedUtc > UtcNow.AddMinutes(-1)))
             throw new InvalidOperationException("برای این آگهی کمی صبر کن و بعد پرسش دیگری بفرست.");
         var question = new ListingQuestion { AdvertisementId = adId, RequesterId = requester, OwnerId = ad.OwnerId,
-            Text = text, CreatedUtc = UtcNow };
+            Text = text, RequesterMessageId = messageId, CreatedUtc = UtcNow };
         store.Save(question);
         return question;
     }

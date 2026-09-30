@@ -204,6 +204,8 @@ public sealed class ListingQuestion
     public long OwnerId { get; set; }
     public string Text { get; set; } = "";
     public string? Answer { get; set; }
+    public int? RequesterMessageId { get; set; }
+    public int? OwnerMessageId { get; set; }
     public bool OwnerNotified { get; set; }
     public bool RequesterNotified { get; set; }
     public DateTime NextNotificationAttemptUtc { get; set; }
