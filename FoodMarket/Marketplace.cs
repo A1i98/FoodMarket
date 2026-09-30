@@ -25,6 +25,7 @@ public sealed class MarketStore : IDisposable
         _db.GetCollection<SupportTicket>("tickets").EnsureIndex(t => t.UserId);
         _db.GetCollection<SupportMessage>("ticketMessages").EnsureIndex(m => m.TicketId);
         _db.GetCollection<InlineDraftMessage>("inlineDraftMessages").EnsureIndex(m => m.OwnerId);
+        _db.GetCollection<ListingQuestion>("listingQuestions").EnsureIndex(q => q.OwnerId);
         if (_db.GetCollection<RuntimeSettings>("runtimeSettings").FindById(1) is { } settings)
             ApplySettings(settings, options);
         if (_db.GetCollection<Cafeteria>("cafeterias").Count() == 0)
@@ -76,12 +77,17 @@ public sealed class MarketStore : IDisposable
         }
     }
     public MarketUser? User(long id) { lock (_gate) return _db.GetCollection<MarketUser>("users").FindById(id); }
+    public IReadOnlyList<MarketUser> Users() { lock (_gate) return _db.GetCollection<MarketUser>("users").FindAll().OrderByDescending(u => u.Id).ToList(); }
     public void Save(MarketUser user) { lock (_gate) _db.GetCollection<MarketUser>("users").Upsert(user); }
+    public void Save(AdminAuditEvent audit) { lock (_gate) _db.GetCollection<AdminAuditEvent>("adminAudit").Insert(audit); }
+    public IReadOnlyList<AdminAuditEvent> AdminAudits()
+    { lock (_gate) return _db.GetCollection<AdminAuditEvent>("adminAudit").FindAll().OrderByDescending(a => a.CreatedUtc).ToList(); }
     public UserSession Session(long id) { lock (_gate) return _db.GetCollection<UserSession>("sessions").FindById(id) ?? new UserSession { Id = id }; }
     public void Save(UserSession session) { lock (_gate) _db.GetCollection<UserSession>("sessions").Upsert(session); }
     public Advertisement? Ad(int id) { lock (_gate) return _db.GetCollection<Advertisement>("ads").FindById(id); }
     public IReadOnlyList<Advertisement> Active() { lock (_gate) return _db.GetCollection<Advertisement>("ads").Find(a => a.Status == ListingStatus.Active).ToList(); }
     public IReadOnlyList<Advertisement> AdsFor(long owner) { lock (_gate) return _db.GetCollection<Advertisement>("ads").Find(a => a.OwnerId == owner).OrderByDescending(a => a.CreatedUtc).ToList(); }
+    public IReadOnlyList<Advertisement> AllAds() { lock (_gate) return _db.GetCollection<Advertisement>("ads").FindAll().OrderByDescending(a => a.CreatedUtc).ToList(); }
     public void Save(Advertisement ad) { lock (_gate) _db.GetCollection<Advertisement>("ads").Upsert(ad); }
     public MarketTransaction? Transaction(int id) { lock (_gate) return _db.GetCollection<MarketTransaction>("transactions").FindById(id); }
     public IReadOnlyList<MarketTransaction> TransactionsFor(long id) { lock (_gate) return _db.GetCollection<MarketTransaction>("transactions").Find(t => t.OwnerId == id || t.CounterpartyId == id).ToList(); }
@@ -93,12 +99,24 @@ public sealed class MarketStore : IDisposable
     public void Update(SharedMessage share) { lock (_gate) _db.GetCollection<SharedMessage>("shares").Update(share); }
     public IReadOnlyList<SharedMessage> SharesForGroup(long groupId) { lock (_gate) return _db.GetCollection<SharedMessage>("shares").Find(s => s.GroupChatId == groupId).ToList(); }
     public InstalledGroup? Group(long id) { lock (_gate) return _db.GetCollection<InstalledGroup>("installedGroups").FindById(id); }
+    public IReadOnlyList<InstalledGroup> AllGroups() { lock (_gate) return _db.GetCollection<InstalledGroup>("installedGroups").FindAll().OrderByDescending(g => g.Active).ThenBy(g => g.Title).ToList(); }
     public IReadOnlyList<InstalledGroup> InstalledGroups() { lock (_gate) return _db.GetCollection<InstalledGroup>("installedGroups").Find(g => g.Active).OrderBy(g => g.Title).ToList(); }
     public void Save(InstalledGroup group) { lock (_gate) _db.GetCollection<InstalledGroup>("installedGroups").Upsert(group); }
     public void Save(InlinePrefill prefill) { lock (_gate) _db.GetCollection<InlinePrefill>("prefills").Upsert(prefill); }
     public string? Prefill(string id) { lock (_gate) return _db.GetCollection<InlinePrefill>("prefills").FindById(id)?.Food; }
     public void Save(InlineDraftMessage message) { lock (_gate) _db.GetCollection<InlineDraftMessage>("inlineDraftMessages").Insert(message); }
     public void Update(InlineDraftMessage message) { lock (_gate) _db.GetCollection<InlineDraftMessage>("inlineDraftMessages").Update(message); }
+    public ListingQuestion? Question(int id) { lock (_gate) return _db.GetCollection<ListingQuestion>("listingQuestions").FindById(id); }
+    public IReadOnlyList<ListingQuestion> QuestionsForAd(int adId, long requester)
+    { lock (_gate) return _db.GetCollection<ListingQuestion>("listingQuestions").Find(q => q.AdvertisementId == adId && q.RequesterId == requester).ToList(); }
+    public IReadOnlyList<ListingQuestion> UnansweredQuestions(long owner)
+    { lock (_gate) return _db.GetCollection<ListingQuestion>("listingQuestions").Find(q => q.OwnerId == owner && q.Answer == null).OrderByDescending(q => q.CreatedUtc).ToList(); }
+    public IReadOnlyList<ListingQuestion> PendingQuestionNotifications()
+    { lock (_gate) return _db.GetCollection<ListingQuestion>("listingQuestions").FindAll().Where(q =>
+        q.NextNotificationAttemptUtc <= DateTime.UtcNow && (q.Answer is null ? !q.OwnerNotified : !q.RequesterNotified))
+        .OrderBy(q => q.CreatedUtc).Take(20).ToList(); }
+    public void Save(ListingQuestion question) { lock (_gate) _db.GetCollection<ListingQuestion>("listingQuestions").Insert(question); }
+    public void Update(ListingQuestion question) { lock (_gate) _db.GetCollection<ListingQuestion>("listingQuestions").Update(question); }
     public bool HasInlineDraftMessage(long ownerId, string inlineMessageId)
     { lock (_gate) return _db.GetCollection<InlineDraftMessage>("inlineDraftMessages").Exists(m => m.OwnerId == ownerId && m.InlineMessageId == inlineMessageId); }
     public IReadOnlyList<InlineDraftMessage> InlineDraftMessages(long ownerId, string token)
@@ -206,6 +224,7 @@ public sealed class Marketplace(MarketStore store, MarketOptions options, TimePr
 
     public Advertisement Publish(Advertisement ad, int? updateId = null)
     {
+        if (store.User(ad.OwnerId)?.Suspended == true) throw new InvalidOperationException("حساب آگهی‌دهنده محدود شده است.");
         if (!IsValid(ad)) throw new InvalidOperationException("نوع آگهی و غذا یا وعده لازم است (برای معاوضه هر دو غذا). ");
         if (new[] { ad.FoodName, ad.OfferedFood, ad.WantedFood, ad.Location }.Any(f =>
             f is not null && Regex.IsMatch(PersianText.Normalize(f), @"(?<!\d)\d{5,}(?!\d)")))
@@ -214,10 +233,13 @@ public sealed class Marketplace(MarketStore store, MarketOptions options, TimePr
         if (updateId.HasValue)
         {
             var previous = store.Ad(updateId.Value);
-            if (previous is null || previous.OwnerId != ad.OwnerId || previous.Status != ListingStatus.Active)
+            if (previous is null || previous.OwnerId != ad.OwnerId || previous.Status != ListingStatus.Active ||
+                ad.Id != 0 && ad.Id != previous.Id ||
+                store.TransactionsForAd(previous.Id).Any(t => t.Status == TransactionStatus.Pending))
                 throw new InvalidOperationException("آگهی قبلی قابل بروزرسانی نیست.");
             ad.Id = previous.Id;
             ad.CreatedUtc = previous.CreatedUtc;
+            ad.MatchNotifications = previous.MatchNotifications;
             ad.GroupChatId = previous.GroupChatId;
             ad.GroupMessageId = previous.GroupMessageId;
         }
@@ -271,13 +293,13 @@ public sealed class Marketplace(MarketStore store, MarketOptions options, TimePr
     }
 
     public IReadOnlyList<(Advertisement Ad, int Score)> Matches(Advertisement ad) => store.Active()
-        .Where(a => a.Id != ad.Id && !IsExpired(a)).Select(a => (Ad: a, Score: MatchScore(ad, a)))
+        .Where(a => a.Id != ad.Id && !IsExpired(a) && store.User(a.OwnerId)?.Suspended != true).Select(a => (Ad: a, Score: MatchScore(ad, a)))
         .Where(pair => pair.Score >= 40).OrderByDescending(pair => pair.Score).ThenByDescending(pair => pair.Ad.CreatedUtc).ToList();
 
     public IReadOnlyList<Advertisement> Search(ParsedListingResult query)
     {
         var word = Food(query.FoodName.Value);
-        return store.Active().Where(a => !IsExpired(a)
+        return store.Active().Where(a => !IsExpired(a) && store.User(a.OwnerId)?.Suspended != true
             && (word.Length == 0 || Food(a.FoodName).Contains(word, StringComparison.OrdinalIgnoreCase)
                 || Food(a.OfferedFood).Contains(word, StringComparison.OrdinalIgnoreCase)
                 || Food(a.WantedFood).Contains(word, StringComparison.OrdinalIgnoreCase))
@@ -290,7 +312,9 @@ public sealed class Marketplace(MarketStore store, MarketOptions options, TimePr
     public MarketTransaction StartTransaction(int adId, long counterparty)
     {
         var ad = store.Ad(adId);
-        if (ad is null || ad.Status != ListingStatus.Active || IsExpired(ad) || ad.OwnerId == counterparty || store.User(counterparty)?.Onboarded != true)
+        if (ad is null || ad.Status != ListingStatus.Active || IsExpired(ad) || ad.OwnerId == counterparty ||
+            store.User(counterparty)?.Onboarded != true || store.User(counterparty)?.Suspended == true ||
+            store.User(ad.OwnerId)?.Suspended == true)
             throw new InvalidOperationException("آگهی فعال نیست یا طرف مقابل هنوز ربات را شروع نکرده است.");
         if (store.TransactionsForAd(adId).Any(t => t.Status == TransactionStatus.Pending))
             throw new InvalidOperationException("این آگهی معاملهٔ در جریان دارد.");
@@ -299,6 +323,34 @@ public sealed class Marketplace(MarketStore store, MarketOptions options, TimePr
             { ListingType.Exchange => TransactionType.Exchange, ListingType.Buy => TransactionType.Sale, _ => TransactionType.Purchase } };
         store.Save(t);
         return t;
+    }
+
+    public ListingQuestion AskQuestion(int adId, long requester, string text)
+    {
+        var ad = store.Ad(adId);
+        text = text.Trim();
+        if (ad is null || ad.Status != ListingStatus.Active || IsExpired(ad) || ad.OwnerId == requester ||
+            store.User(requester)?.Onboarded != true || store.User(requester)?.Suspended == true ||
+            store.User(ad.OwnerId)?.Suspended == true || text.Length is < 2 or > 1000)
+            throw new InvalidOperationException("پرسش معتبر نیست یا آگهی دیگر فعال نیست.");
+        if (store.QuestionsForAd(adId, requester).Any(q => q.CreatedUtc > UtcNow.AddMinutes(-1)))
+            throw new InvalidOperationException("برای این آگهی کمی صبر کن و بعد پرسش دیگری بفرست.");
+        var question = new ListingQuestion { AdvertisementId = adId, RequesterId = requester, OwnerId = ad.OwnerId,
+            Text = text, CreatedUtc = UtcNow };
+        store.Save(question);
+        return question;
+    }
+
+    public ListingQuestion AnswerQuestion(int questionId, long owner, string answer)
+    {
+        var question = store.Question(questionId);
+        answer = answer.Trim();
+        if (question is null || question.OwnerId != owner || question.Answer is not null || answer.Length is < 1 or > 1000)
+            throw new InvalidOperationException("این پرسش قابل پاسخ‌دادن نیست.");
+        question.Answer = answer;
+        question.NextNotificationAttemptUtc = UtcNow;
+        store.Update(question);
+        return question;
     }
 
     public MarketTransaction ConfirmDelivery(int transactionId, long actor)
@@ -382,6 +434,12 @@ public sealed class Marketplace(MarketStore store, MarketOptions options, TimePr
         ad.Status = ListingStatus.Cancelled;
         store.Save(ad);
         return true;
+    }
+
+    public bool CancelOwnListing(int adId, long owner)
+    {
+        if (store.Ad(adId)?.OwnerId != owner) return false;
+        return CancelListing(adId);
     }
 
     public bool RemoveReportedListing(int adId)

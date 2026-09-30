@@ -99,6 +99,17 @@ public sealed class MarketUser
     public double Rating { get; set; }
     public DateTime? LastNotificationUtc { get; set; }
     public bool NotificationsEnabled { get; set; } = true;
+    public bool Suspended { get; set; }
+}
+
+public sealed class AdminAuditEvent
+{
+    public int Id { get; set; }
+    public long ActorId { get; set; }
+    public string Action { get; set; } = "";
+    public long TargetId { get; set; }
+    public string? Detail { get; set; }
+    public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
 }
 
 public sealed class MarketTransaction
@@ -134,6 +145,7 @@ public sealed class UserSession
     public string? SensitiveNumber { get; set; }
     public int? PreviewMessageId { get; set; }
     public string? InlineDraftToken { get; set; }
+    public int? UpdatingAdvertisementId { get; set; }
 }
 
 public sealed class SharedMessage
@@ -142,6 +154,7 @@ public sealed class SharedMessage
     public int AdvertisementId { get; set; }
     public string InlineMessageId { get; set; } = "";
     public bool CompactInlineCard { get; set; }
+    public bool GroupSearchResult { get; set; }
     public long? GroupChatId { get; set; }
     public int? GroupMessageId { get; set; }
 }
@@ -179,6 +192,20 @@ public sealed class ListingReport
     public string Reason { get; set; } = "";
     public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
     public ReportStatus Status { get; set; } = ReportStatus.Open;
+}
+
+public sealed class ListingQuestion
+{
+    public int Id { get; set; }
+    public int AdvertisementId { get; set; }
+    public long RequesterId { get; set; }
+    public long OwnerId { get; set; }
+    public string Text { get; set; } = "";
+    public string? Answer { get; set; }
+    public bool OwnerNotified { get; set; }
+    public bool RequesterNotified { get; set; }
+    public DateTime NextNotificationAttemptUtc { get; set; }
+    public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
 }
 
 public sealed class SupportTicket

@@ -3,7 +3,7 @@ using Telegram.Bot.Types.Enums;
 namespace FoodMarket;
 
 public enum GroupCommandResult { NotCommand, Unauthorized, Installed, Uninstalled }
-public enum InlineScope { None, PrivateListings, GroupPrivateLinks }
+public enum InlineScope { None, PrivateListings }
 
 public sealed class GroupAccess(MarketStore store, MarketOptions options, TimeProvider? clock = null)
 {
@@ -14,9 +14,26 @@ public sealed class GroupAccess(MarketStore store, MarketOptions options, TimePr
     public static InlineScope GetInlineScope(ChatType? chatType) => chatType switch
     {
         ChatType.Private or ChatType.Sender => InlineScope.PrivateListings,
-        ChatType.Group or ChatType.Supergroup => InlineScope.GroupPrivateLinks,
+        // Inline queries expose the chat type, but never the destination group's ID.
+        // Group search is served by /food after checking the installed chat ID instead.
         _ => InlineScope.None
     };
+
+    public string? AuthorizedSearchQuery(long chatId, string text, string botUsername)
+    {
+        if (!IsInstalled(chatId)) return null;
+        return GroupSearchQuery(text, botUsername);
+    }
+
+    private static string? GroupSearchQuery(string text, string botUsername)
+    {
+        var parts = PersianText.Normalize(text).Split(' ', 2);
+        if (parts[0] is "/food" or "/غذا" ||
+            parts[0].Equals($"/food@{botUsername}", StringComparison.OrdinalIgnoreCase) ||
+            parts[0].Equals($"/غذا@{botUsername}", StringComparison.OrdinalIgnoreCase))
+            return parts.Length == 2 ? parts[1] : "";
+        return null;
+    }
 
     public void Deactivate(long chatId)
     {
@@ -47,6 +64,7 @@ public sealed class GroupAccess(MarketStore store, MarketOptions options, TimePr
         group.InstalledBy = actor;
         group.InstalledUtc = _clock.GetUtcNow().UtcDateTime;
         store.Save(group);
+        store.Save(new AdminAuditEvent { ActorId = actor, Action = install ? "group_install" : "group_uninstall", TargetId = chatId, Detail = group.Title });
         return install ? GroupCommandResult.Installed : GroupCommandResult.Uninstalled;
     }
 }

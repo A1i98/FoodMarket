@@ -183,4 +183,68 @@ public sealed class MarketplaceTests
             Assert.False(market.MarkSold(ad.Id, 1));
         }
     }
+
+    [Fact]
+    public void Editing_and_cancelling_a_listing_preserve_identity_and_respect_owner_and_reservations()
+    {
+        var (store, market) = Setup();
+        using (store)
+        {
+            store.Save(new MarketUser { Id = 2, Onboarded = true });
+            var original = market.Publish(Listing(1, ListingType.Sell, "قیمه"));
+            original.MatchNotifications = true;
+            store.Save(original);
+            var createdUtc = store.Ad(original.Id)!.CreatedUtc;
+            var revised = Listing(1, ListingType.Sell, "ساندویچ");
+            revised.Price = 100000;
+            market.Publish(revised, original.Id);
+            Assert.Equal(original.Id, revised.Id);
+            Assert.Equal(createdUtc, revised.CreatedUtc);
+            Assert.Equal("ساندویچ", store.Ad(original.Id)?.FoodName);
+            Assert.True(store.Ad(original.Id)?.MatchNotifications);
+            Assert.Throws<InvalidOperationException>(() => market.Publish(Listing(3, ListingType.Sell, "قیمه"), original.Id));
+            Assert.False(market.CancelOwnListing(original.Id, 3));
+            var trade = market.StartTransaction(original.Id, 2);
+            Assert.Throws<InvalidOperationException>(() => market.Publish(Listing(1, ListingType.Sell, "قیمه"), original.Id));
+            Assert.False(market.CancelOwnListing(original.Id, 1));
+            market.CancelTransaction(trade.Id, 1);
+            Assert.True(market.CancelOwnListing(original.Id, 1));
+            Assert.Equal(ListingStatus.Cancelled, store.Ad(original.Id)?.Status);
+            Assert.Throws<InvalidOperationException>(() => market.Publish(Listing(1, ListingType.Sell, "قیمه"), original.Id));
+        }
+    }
+
+    [Fact]
+    public void Questions_are_private_rate_limited_and_only_the_owner_answers_once()
+    {
+        var (store, market) = Setup();
+        using (store)
+        {
+            store.Save(new MarketUser { Id = 1, Onboarded = true });
+            store.Save(new MarketUser { Id = 2, Onboarded = true });
+            var ad = market.Publish(Listing(1, ListingType.Sell, "قیمه"));
+            Assert.Throws<InvalidOperationException>(() => market.AskQuestion(ad.Id, 1, "قیمت چقدر است؟"));
+            Assert.Throws<InvalidOperationException>(() => market.AskQuestion(ad.Id, 3, "قیمت چقدر است؟"));
+            var question = market.AskQuestion(ad.Id, 2, "قیمت چقدر است؟");
+            Assert.Equal(ad.Id, question.AdvertisementId);
+            Assert.Single(store.UnansweredQuestions(1));
+            Assert.Single(store.PendingQuestionNotifications());
+            question.OwnerNotified = true; store.Update(question);
+            Assert.Empty(store.PendingQuestionNotifications());
+            Assert.Throws<InvalidOperationException>(() => market.AskQuestion(ad.Id, 2, "تحویل کجاست؟"));
+            Assert.Throws<InvalidOperationException>(() => market.AnswerQuestion(question.Id, 2, "۱۰۰ تومان"));
+            Assert.Equal("۱۰۰ تومان", market.AnswerQuestion(question.Id, 1, "۱۰۰ تومان").Answer);
+            Assert.Empty(store.UnansweredQuestions(1));
+            Assert.Single(store.PendingQuestionNotifications());
+            question = store.Question(question.Id)!;
+            question.NextNotificationAttemptUtc = DateTime.UtcNow.AddMinutes(5); store.Update(question);
+            Assert.Empty(store.PendingQuestionNotifications());
+            question.NextNotificationAttemptUtc = DateTime.UtcNow.AddSeconds(-1);
+            question.RequesterNotified = true; store.Update(question);
+            Assert.Empty(store.PendingQuestionNotifications());
+            Assert.Throws<InvalidOperationException>(() => market.AnswerQuestion(question.Id, 1, "پاسخ دوباره"));
+            Assert.True(market.CancelOwnListing(ad.Id, 1));
+            Assert.Throws<InvalidOperationException>(() => market.AskQuestion(ad.Id, 2, "هنوز موجود است؟"));
+        }
+    }
 }

@@ -37,8 +37,9 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
             new[] { new KeyboardButton("💰 فروش غذا"), new KeyboardButton("🛒 خرید غذا") },
             new[] { new KeyboardButton("🔄 معاوضه"), new KeyboardButton("🔍 جستجوی غذا") },
             new[] { new KeyboardButton("📋 آگهی‌های من"), new KeyboardButton("🤝 معاملات من") },
+            new[] { new KeyboardButton("💬 پرسش‌های آگهی‌ها") },
             new[] { new KeyboardButton("⭐ پروفایل و اعتبار"), new KeyboardButton("⚙️ تنظیمات") },
-            new[] { new KeyboardButton("💬 پشتیبانی"), new KeyboardButton("🏠 منوی اصلی") }
+            new[] { new KeyboardButton("💬 پشتیبانی"), new KeyboardButton("ℹ️ راهنما"), new KeyboardButton("🏠 منوی اصلی") }
         };
         if (admin) rows.Add([new("🛠 پنل مدیریت")]);
         return new ReplyKeyboardMarkup(rows) { ResizeKeyboard = true, IsPersistent = true };
@@ -68,6 +69,8 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
                 if (store.InlineDraftMessages(pending.OwnerId, pending.Token).FirstOrDefault(m => m.PublishedAdvertisementId.HasValue) is { } draft &&
                     store.Ad(draft.PublishedAdvertisementId!.Value) is { } published)
                     await SyncInlineDraft(draft.OwnerId, draft.Token, published, ct);
+            foreach (var question in store.PendingQuestionNotifications())
+                await NotifyQuestion(question, ct);
         }
     }
 
@@ -140,6 +143,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         {
             ListingType.Sell => "✅ فروخته شد", ListingType.Buy => "✅ خریداری شد", _ => "✅ معاوضه انجام شد"
         });
+        else if (user?.Suspended == true) s.AppendLine("⛔ آگهی به‌دلیل محدودیت حساب غیرفعال است");
         else s.AppendLine(Header(ad));
         if (ad.Type == ListingType.Exchange)
             s.AppendLine($"🍛 می‌دهم: {ad.OfferedFood}").AppendLine($"🔁 می‌خواهم: {ad.WantedFood}");
@@ -147,6 +151,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         s.AppendLine($"سلف: {GenderName(ad.Gender)}{(ad.Location is null ? "" : " | " + ad.Location)}");
         if (ad.Meal != MealType.Unknown) s.AppendLine($"🍽 {MealName(ad.Meal)}");
         if (ad.Price.HasValue) s.AppendLine($"💵 {(ad.Type == ListingType.Exchange ? "تفاوت قیمت: " : "")}{PriceName(ad.Price)}");
+        else if (ad.Type != ListingType.Exchange) s.AppendLine("💵 قیمت: از آگهی‌دهنده بپرسید");
         s.AppendLine($"📅 {DateName(ad)}");
         s.AppendLine($"👤 {(ad.OwnerUsername is null ? "کاربر" : "@" + ad.OwnerUsername)}");
         if (user is not null) s.AppendLine($"⭐ {(user.Rating == 0 ? "بدون امتیاز" : user.Rating.ToString("0.0"))} | 🛡 {user.TrustScore}/100 | ✅ {user.SuccessfulTransactions} معامله");
@@ -157,11 +162,10 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
     private string InlineCard(Advertisement ad)
     {
         var card = Card(ad);
-        if (ad.Status == ListingStatus.Sold)
-            return ListingCardStatus.Completed(Header(ad) + card[card.IndexOf('\n')..], ad.Type);
-        if (ad.Status is not (ListingStatus.Sold or ListingStatus.Expired or ListingStatus.Cancelled)) return WebUtility.HtmlEncode(card);
-        var newline = card.IndexOf('\n');
-        return $"<s>{WebUtility.HtmlEncode(Header(ad))}</s>\n" + WebUtility.HtmlEncode(card[..newline] + card[newline..]);
+        if (ad.Status == ListingStatus.Active && store.User(ad.OwnerId)?.Suspended != true) return WebUtility.HtmlEncode(card);
+        var body = Header(ad) + card[card.IndexOf('\n')..];
+        return ad.Status == ListingStatus.Sold ? ListingCardStatus.Completed(body, ad.Type)
+            : ad.Status == ListingStatus.Active ? ListingCardStatus.Suspended(body) : ListingCardStatus.Inactive(body, ad.Status);
     }
 
     private string CompactInlineCard(Advertisement ad)
@@ -179,28 +183,31 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         }
         else if (ad.Type == ListingType.Buy && ad.FoodName is null) lines.Add("🍛 نوع غذا: فرقی ندارد");
         if (ad.Price.HasValue) lines.Add($"💵 {PriceName(ad.Price)}");
+        else if (ad.Type != ListingType.Exchange) lines.Add("💵 قیمت: از آگهی‌دهنده بپرسید");
         if (ad.Date.HasValue || ad.DateRange is not null) lines.Add($"📅 {DateName(ad)}");
         if (user is not null) lines.Add($"👤 {(ad.OwnerUsername is null ? "کاربر" : "@" + ad.OwnerUsername)} · ⭐ {(user.Rating == 0 ? "بدون امتیاز" : user.Rating.ToString("0.0"))} · 🛡 {user.TrustScore}/100");
         lines.Add($"🆔 #{(ad.Type == ListingType.Sell ? "F" : ad.Type == ListingType.Buy ? "B" : "E")}{ad.Id}");
         if (ad.Status == ListingStatus.Sold) return ListingCardStatus.Completed(string.Join("\n", lines), ad.Type);
-        if (ad.Status != ListingStatus.Active) lines.Add(ad.Status == ListingStatus.Expired ? "⌛ منقضی شد" : "⛔ غیرفعال شد");
-        return string.Join("\n", lines.Select((line, index) => index == 0 && ad.Status != ListingStatus.Active
-            ? $"<s>{WebUtility.HtmlEncode(line)}</s>" : WebUtility.HtmlEncode(line)));
+        if (user?.Suspended == true && ad.Status == ListingStatus.Active) return ListingCardStatus.Suspended(string.Join("\n", lines));
+        if (ad.Status != ListingStatus.Active) return ListingCardStatus.Inactive(string.Join("\n", lines), ad.Status);
+        return string.Join("\n", lines.Select(WebUtility.HtmlEncode));
     }
 
     private InlineKeyboardMarkup CardButtons(Advertisement ad, long? viewerId = null, bool compact = false)
     {
-        if (ad.Status != ListingStatus.Active) return ClosedCardButtons(ad);
+        if (ad.Status != ListingStatus.Active || store.User(ad.OwnerId)?.Suspended == true) return ClosedCardButtons(ad);
         var rows = new List<InlineKeyboardButton[]>
         {
-            new[] { Link(ad.Type == ListingType.Exchange ? "🔄 پیشنهاد معاوضه" : ad.Type == ListingType.Buy ? "💰 پیشنهاد فروش" : "🛒 خرید", $"deal_{ad.Id}"),
-                Link("⭐ اعتبار کاربر", $"profile_{ad.OwnerId}") }
+            new[] { Link("💬 پرسش از آگهی‌دهنده", $"ask_{ad.Id}"),
+                Link(ad.Type == ListingType.Exchange ? "🔄 پیشنهاد معاوضه" : ad.Type == ListingType.Buy ? "💰 پیشنهاد فروش" : "🛒 خرید", $"deal_{ad.Id}") },
+            new[] { Link("⭐ اعتبار کاربر", $"profile_{ad.OwnerId}") }
         };
         if (viewerId is null || viewerId == ad.OwnerId)
         {
             if (ad.Type == ListingType.Sell) rows.Add([C("✅ فروخته شد", $"{(compact ? "soldc" : "sold")}_{ad.Id}"), Link("🚨 گزارش", $"report_{ad.Id}")]);
             else if (ad.Type == ListingType.Buy) rows.Add([C("✅ خریداری شد", $"{(compact ? "fulfilledc" : "fulfilled")}_{ad.Id}"), Link("🚨 گزارش", $"report_{ad.Id}")]);
             else rows.Add([Link("🚨 گزارش", $"report_{ad.Id}")]);
+            rows.Add([Link("✏️ ویرایش آگهی", $"editad_{ad.Id}")]);
         }
         else rows.Add([Link("🚨 گزارش", $"report_{ad.Id}")]);
         return new InlineKeyboardMarkup(rows);
@@ -216,12 +223,13 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
 
     private static InlineKeyboardMarkup OwnerButtons(Advertisement ad) => new(new[]
     {
-        new[] { C("📢 انتشار در گروه", $"groups_{ad.Id}") },
+        new[] { C("✏️ ویرایش آگهی", $"editad_{ad.Id}"), C("📢 انتشار در گروه", $"groups_{ad.Id}") },
         ad.Type == ListingType.Sell
             ? new[] { C("✅ فروخته شد", $"sold_{ad.Id}"), C(ad.MatchNotifications ? "🔕 قطع اعلان" : "🔔 اعلان مورد مناسب", $"notify_{ad.Id}") }
             : ad.Type == ListingType.Buy
             ? new[] { C("✅ خریداری شد", $"fulfilled_{ad.Id}"), C(ad.MatchNotifications ? "🔕 قطع اعلان" : "🔔 اعلان مورد مناسب", $"notify_{ad.Id}") }
-            : new[] { C(ad.MatchNotifications ? "🔕 قطع اعلان" : "🔔 اعلان مورد مناسب", $"notify_{ad.Id}") }
+            : new[] { C(ad.MatchNotifications ? "🔕 قطع اعلان" : "🔔 اعلان مورد مناسب", $"notify_{ad.Id}") },
+        new[] { C("⛔ لغو آگهی", $"cancelad_{ad.Id}") }
     });
 
     private static InlineKeyboardMarkup TransactionButtons(MarketTransaction t, long viewer)
@@ -235,9 +243,9 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         });
     }
 
-    private static InlineKeyboardMarkup PreviewButtons(Advertisement ad) => new(new[]
+    private static InlineKeyboardMarkup PreviewButtons(Advertisement ad, bool updating = false) => new(new[]
     {
-        new[] { C("✅ درسته، منتشر کن", "publish") },
+        new[] { C(updating ? "✅ ذخیرهٔ تغییرات" : "✅ درسته، منتشر کن", "publish") },
         new[] { C("✏️ نوع", "edit_type"), C("✏️ غذا", "edit_food"), C("✏️ قیمت", "edit_price") },
         new[] { C("✏️ سلف", "edit_gender"), C("✏️ محل", "edit_location"), C("✏️ وعده", "edit_meal") },
         new[] { C("✏️ تاریخ", "edit_date"), C("❌ لغو", "cancel") }
@@ -257,8 +265,8 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
 
     private async Task ShowPreview(UserSession session, Advertisement ad, CancellationToken ct)
     {
-        var text = Preview(ad);
-        var keyboard = PreviewButtons(ad);
+        var text = (session.UpdatingAdvertisementId is { } updatingId ? $"✏️ ویرایش آگهی #{updatingId}\n\n" : "") + Preview(ad);
+        var keyboard = PreviewButtons(ad, session.UpdatingAdvertisementId.HasValue);
         if (session.PreviewMessageId is { } messageId)
         {
             try
@@ -293,7 +301,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
                 else foreach (var adId in store.SharesForGroup(msg.Chat.Id).Select(s => s.AdvertisementId).Distinct())
                     await EditShares(adId, ct);
                 await bot.SendMessage(msg.Chat.Id, command == GroupCommandResult.Installed
-                    ? "✅ بازار غذا در این گروه نصب شد. کاربران می‌توانند آگهی را در خصوصی ثبت کنند و از دکمهٔ «انتشار در گروه» همین گروه را انتخاب کنند. برای بررسی عضویت، ربات را ادمین گروه کنید."
+                    ? "✅ بازار غذا در این گروه نصب شد. کاربران می‌توانند اینجا /food قیمه را جست‌وجو کنند یا در خصوصی آگهی ثبت و همین گروه را برای انتشار انتخاب کنند. برای بررسی عضویت، ربات را ادمین گروه کنید."
                     : "⛔ بازار غذا از این گروه حذف شد و انتشار آگهی متوقف شد.", cancellationToken: ct);
                 return;
             }
@@ -303,6 +311,22 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
                 return;
             }
             if (!_groups.IsInstalled(msg.Chat.Id)) return;
+            if (_groups.AuthorizedSearchQuery(msg.Chat.Id, msg.Text, _username) is { } query)
+            {
+                if (string.IsNullOrWhiteSpace(query))
+                { await bot.SendMessage(msg.Chat.Id, "برای جست‌وجو بنویس: /food قیمه (فقط در گروه‌های نصب‌شده).", cancellationToken: ct); return; }
+                var search = await parser.ParseAsync(query, ct);
+                var matches = market.Search(search).Take(3).ToList();
+                if (matches.Count == 0)
+                { await bot.SendMessage(msg.Chat.Id, "آگهی فعالی برای این جست‌وجو پیدا نشد.", cancellationToken: ct); return; }
+                foreach (var found in matches)
+                {
+                    var sent = await bot.SendMessage(msg.Chat.Id, Card(found), replyMarkup: CardButtons(found), cancellationToken: ct);
+                    store.Save(new SharedMessage { AdvertisementId = found.Id, GroupChatId = msg.Chat.Id,
+                        GroupMessageId = sent.MessageId, GroupSearchResult = true });
+                }
+                return;
+            }
             var groupParsed = await parser.ParseAsync(msg.Text, ct);
             if (groupParsed.PossibleSensitiveCode.Value is not null)
                 await bot.SendMessage(msg.Chat.Id, "⚠️ عدد پیام ممکن است کد تحویل یا رزرو باشد. برای امنیت آن را در آگهی عمومی منتشر نکنید؛ با ربات در خصوصی ادامه دهید.", replyParameters: new ReplyParameters { MessageId = msg.MessageId }, cancellationToken: ct);
@@ -321,6 +345,8 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         var text = msg.Text.Trim();
         if (text.StartsWith("/start", StringComparison.Ordinal))
         {
+            if (store.User(id)?.Suspended == true)
+            { await bot.SendMessage(id, "⛔ دسترسی حساب شما محدود شده است. برای پیگیری /support و برای معاملات قبلی /mytrades را بزنید.", cancellationToken: ct); return; }
             var parameter = text.Split(' ', 2).ElementAtOrDefault(1) ?? "";
             if (store.User(id)?.Onboarded != true)
             {
@@ -345,13 +371,26 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
             profile.Username = msg.From.Username;
             store.Save(profile);
         }
+        if (store.User(id)?.Suspended == true && text is not ("/support" or "/help" or "/cancel" or "/mytrades") &&
+            !text.StartsWith("/code ", StringComparison.Ordinal) &&
+            session.EditingField?.StartsWith("support:", StringComparison.Ordinal) != true)
+        { await bot.SendMessage(id, "⛔ دسترسی حساب شما محدود شده است. برای پیگیری /support و برای معاملات قبلی /mytrades را بزنید.", cancellationToken: ct); return; }
         if (text == "/cancel")
         {
-            session.EditingField = null; store.Save(session);
-            await bot.SendMessage(id, "از حالت گفتگو/ویرایش خارج شدی. برای منو /start را بزن.", cancellationToken: ct);
+            session.EditingField = null;
+            session.DraftJson = null;
+            session.SensitiveNumber = null;
+            session.DuplicateId = null;
+            session.InlineDraftToken = null;
+            session.UpdatingAdvertisementId = null;
+            session.PreviewMessageId = null;
+            store.Save(session);
+            await bot.SendMessage(id, "از حالت گفتگو خارج شدی و پیش‌نویس کنار گذاشته شد. آگهی‌های ثبت‌شده تغییری نکردند.", cancellationToken: ct);
             return;
         }
-        if (text is "/support" or "/help") { await BeginSupport(id, ct); return; }
+        if (text == "/help") { await ShowHelp(id, ct); return; }
+        if (text == "/support") { await BeginSupport(id, ct); return; }
+        if (text == "/mytrades") { await UserTransactions(id, 0, ct); return; }
         if (text == "/admin" && IsAdmin(id)) { await AdminMenu(id, ct); return; }
         if (text == "/tickets" && IsAdmin(id)) { await TicketList(id, 0, ct); return; }
         if (text == "/transactions" && IsAdmin(id)) { await PendingTransactions(id, ct); return; }
@@ -364,8 +403,14 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         if (text.StartsWith("/cafeteria", StringComparison.Ordinal) && id == options.AdminUserId)
         {
             var parts = text.Split(' ', 3);
-            if (parts.Length == 3 && parts[1] == "add") _admin.AddCafeteria(parts[2]);
-            if (parts.Length == 3 && parts[1] == "remove") store.RemoveCafeteria(parts[2]);
+            if (parts.Length == 3 && parts[1] == "add" && _admin.AddCafeteria(parts[2]))
+                Audit(id, "cafeteria_update", 0, $"افزودن {parts[2][..Math.Min(parts[2].Length, 50)]}");
+            if (parts.Length == 3 && parts[1] == "remove" && store.Cafeterias().Any(c => c.Active &&
+                PersianText.Normalize(c.Name) == PersianText.Normalize(parts[2])))
+            {
+                store.RemoveCafeteria(parts[2]);
+                Audit(id, "cafeteria_update", 0, $"حذف {parts[2][..Math.Min(parts[2].Length, 50)]}");
+            }
             await CafeteriaMenu(id, 0, ct);
             return;
         }
@@ -398,6 +443,42 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
             {
                 session.EditingField = null; store.Save(session);
                 await ShowPrivateSearch(id, text, ct);
+                return;
+            }
+            if (field.StartsWith("ask:", StringComparison.Ordinal) && int.TryParse(field[4..], out var askedAdId))
+            {
+                try
+                {
+                    var question = market.AskQuestion(askedAdId, id, text);
+                    session.EditingField = null; store.Save(session);
+                    await bot.SendMessage(id, "✅ پرسش برای مالک آگهی ثبت شد. پاسخ در همین چت می‌آید.", cancellationToken: ct);
+                    if (!await NotifyQuestion(question, ct))
+                        await bot.SendMessage(id, "پرسش ذخیره شد؛ اعلان مالک دوباره تلاش می‌شود و در «پرسش‌های آگهی‌ها» هم هست.", cancellationToken: ct);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    if (store.Ad(askedAdId) is not { Status: ListingStatus.Active })
+                    { session.EditingField = null; store.Save(session); }
+                    await bot.SendMessage(id, ex.Message, cancellationToken: ct);
+                }
+                return;
+            }
+            if (field.StartsWith("answer:", StringComparison.Ordinal) && int.TryParse(field[7..], out var answeredQuestionId))
+            {
+                try
+                {
+                    var question = market.AnswerQuestion(answeredQuestionId, id, text);
+                    session.EditingField = null; store.Save(session);
+                    await bot.SendMessage(id, "✅ پاسخ ثبت شد.", cancellationToken: ct);
+                    if (!await NotifyQuestion(question, ct))
+                        await bot.SendMessage(id, "پاسخ ذخیره شد؛ ارسال آن به پرسش‌گر دوباره تلاش می‌شود.", cancellationToken: ct);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    if (store.Question(answeredQuestionId)?.Answer is not null)
+                    { session.EditingField = null; store.Save(session); }
+                    await bot.SendMessage(id, ex.Message, cancellationToken: ct);
+                }
                 return;
             }
             if (field.StartsWith("support:", StringComparison.Ordinal) && int.TryParse(field[8..], out var ticketId) ||
@@ -520,6 +601,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         }
         session.PreviewMessageId = null;
         session.InlineDraftToken = sourceToken;
+        session.UpdatingAdvertisementId = null;
         SaveDraft(session, ad);
         session.SensitiveNumber = result.PossibleSensitiveCode.Value;
         session.DuplicateId = null;
@@ -569,6 +651,10 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         { await MarkCompleted(id, fulfilledId, true, ct); return; }
         if (parameter.StartsWith("review_", StringComparison.Ordinal) && int.TryParse(parameter[7..], out var reviewId))
         { await ShowRatingPrompt(id, reviewId, ct); return; }
+        if (parameter.StartsWith("editad_", StringComparison.Ordinal) && int.TryParse(parameter[7..], out var editingId))
+        { await BeginEditListing(id, editingId, ct); return; }
+        if (parameter.StartsWith("ask_", StringComparison.Ordinal) && int.TryParse(parameter[4..], out var askedId))
+        { await BeginQuestion(id, askedId, ct); return; }
         if (parameter.StartsWith("draft_", StringComparison.Ordinal) && store.Prefill(parameter[6..]) is { } draftText)
         {
             await CreateDraftFromText(id, store.User(id)?.Username, draftText, store.Session(id), false, ct, sourceToken: parameter[6..]);
@@ -578,7 +664,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         {
             var found = store.Ad(viewId);
             await bot.SendMessage(id, found is null ? "آگهی پیدا نشد." : Card(found),
-                replyMarkup: found is { Status: ListingStatus.Active } && !market.IsExpired(found) ? CardButtons(found) : null,
+                replyMarkup: found is { Status: ListingStatus.Active } && !market.IsExpired(found) ? CardButtons(found, id) : null,
                 cancellationToken: ct);
             return;
         }
@@ -626,6 +712,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
                 var session = store.Session(id);
                 session.PreviewMessageId = null;
                 session.InlineDraftToken = null;
+                session.UpdatingAdvertisementId = null;
                 SaveDraft(session, ad);
                 await ShowPreview(session, ad, ct);
                 return;
@@ -641,8 +728,9 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
             new[] { C("💰 فروش غذا", "new_sell"), C("🛒 خرید غذا", "new_buy") },
             new[] { C("🔄 معاوضه", "new_exchange"), C("🔍 جستجوی غذا", "search") },
             new[] { C("📋 آگهی‌های من", "mine"), C("🤝 معاملات من", "transactions") },
+            new[] { C("💬 پرسش‌های آگهی‌ها", "questions") },
             new[] { C("⭐ پروفایل و اعتبار", "profile"), C("⚙️ تنظیمات", "settings") },
-            new[] { C("💬 گفتگو با پشتیبانی", "support") }
+            new[] { C("💬 گفتگو با پشتیبانی", "support"), C("ℹ️ راهنما", "help") }
         };
         if (IsAdmin(id)) rows.Add([C("🛠 پنل مدیریت", "adm_home")]);
         await bot.SendMessage(id, "🍽 بازار غذای دانشگاه\nچه کاری می‌خوای انجام بدی؟\nیا متن آگهی را همین‌جا بنویس:",
@@ -656,10 +744,107 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         session.DuplicateId = null;
         session.PreviewMessageId = null;
         session.InlineDraftToken = null;
+        session.UpdatingAdvertisementId = null;
         var ad = new Advertisement { OwnerId = id, OwnerUsername = username, Type = type,
             Date = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(market.UtcNow, TimeZoneInfo.FindSystemTimeZoneById(options.TimeZone))) };
         SaveDraft(session, ad);
         await ShowPreview(session, ad, ct);
+    }
+
+    private async Task BeginEditListing(long userId, int adId, CancellationToken ct)
+    {
+        var ad = store.Ad(adId);
+        if (ad?.OwnerId != userId || ad.Status != ListingStatus.Active || market.IsExpired(ad) ||
+            store.TransactionsForAd(adId).Any(t => t.Status == TransactionStatus.Pending))
+        {
+            await bot.SendMessage(userId, "این آگهی قابل ویرایش نیست؛ آگهی باید فعال و بدون معاملهٔ در جریان باشد.", cancellationToken: ct);
+            return;
+        }
+        var session = store.Session(userId);
+        session.EditingField = null;
+        session.SensitiveNumber = null;
+        session.DuplicateId = null;
+        session.PreviewMessageId = null;
+        session.InlineDraftToken = null;
+        session.UpdatingAdvertisementId = adId;
+        SaveDraft(session, ad);
+        await ShowPreview(session, ad, ct);
+    }
+
+    private async Task BeginQuestion(long userId, int adId, CancellationToken ct)
+    {
+        var ad = store.Ad(adId);
+        if (ad is null || ad.Status != ListingStatus.Active || market.IsExpired(ad) || ad.OwnerId == userId)
+        { await bot.SendMessage(userId, "فقط دربارهٔ آگهی فعالِ شخص دیگری می‌توانی سؤال بپرسی.", cancellationToken: ct); return; }
+        var session = store.Session(userId);
+        session.EditingField = $"ask:{adId}"; store.Save(session);
+        await bot.SendMessage(userId, $"💬 پرسش دربارهٔ آگهی #{adId} را در یک پیام بنویس؛ مثلاً قیمت یا جزئیات تحویل را بپرس. با /cancel منصرف شو.", cancellationToken: ct);
+    }
+
+    private async Task BeginAnswer(long userId, int questionId, CancellationToken ct)
+    {
+        var question = store.Question(questionId);
+        if (question?.OwnerId != userId || question.Answer is not null)
+        { await bot.SendMessage(userId, "این پرسش برای پاسخ‌دادن در دسترس نیست.", cancellationToken: ct); return; }
+        var session = store.Session(userId);
+        session.EditingField = $"answer:{questionId}"; store.Save(session);
+        await bot.SendMessage(userId, $"✍️ پاسخ به پرسش آگهی #{question.AdvertisementId}:\n{question.Text}\n\nپاسخت را بفرست؛ برای انصراف /cancel را بزن.", cancellationToken: ct);
+    }
+
+    private async Task ShowQuestions(long userId, CancellationToken ct, int page = 0)
+    {
+        var questions = store.UnansweredQuestions(userId);
+        if (questions.Count == 0)
+        { await bot.SendMessage(userId, "پرسش بی‌پاسخی دربارهٔ آگهی‌هایت نداری.", cancellationToken: ct); return; }
+        page = Math.Clamp(page, 0, (questions.Count - 1) / 5);
+        await bot.SendMessage(userId, $"💬 پرسش‌های بی‌پاسخ | صفحهٔ {page + 1}", cancellationToken: ct);
+        foreach (var question in questions.Skip(page * 5).Take(5))
+            await bot.SendMessage(userId, $"آگهی #{question.AdvertisementId}: {question.Text}",
+                replyMarkup: new InlineKeyboardMarkup(new[] { new[] { C("✍️ پاسخ", $"answer_{question.Id}") } }), cancellationToken: ct);
+        var navigation = new List<InlineKeyboardButton>();
+        if (page > 0) navigation.Add(C("⬅️ قبلی", $"questions_{page - 1}"));
+        if ((page + 1) * 5 < questions.Count) navigation.Add(C("بعدی ➡️", $"questions_{page + 1}"));
+        if (navigation.Count > 0)
+            await bot.SendMessage(userId, "صفحهٔ بعد/قبل:", replyMarkup: new InlineKeyboardMarkup(new[] { navigation.ToArray() }), cancellationToken: ct);
+    }
+
+    private async Task<bool> NotifyQuestion(ListingQuestion question, CancellationToken ct)
+    {
+        try
+        {
+            if (store.Question(question.Id) is not { } current || current.Answer != question.Answer) return true;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(15));
+            if (question.Answer is null)
+            {
+                if (question.OwnerNotified) return true;
+                await bot.SendMessage(question.OwnerId, $"💬 پرسش دربارهٔ آگهی #{question.AdvertisementId}:\n{question.Text}",
+                    replyMarkup: new InlineKeyboardMarkup(new[] { new[] { C("✍️ پاسخ به پرسش", $"answer_{question.Id}") } }), cancellationToken: timeout.Token);
+                current = store.Question(question.Id)!;
+                current.OwnerNotified = true;
+            }
+            else
+            {
+                if (question.RequesterNotified) return true;
+                await bot.SendMessage(question.RequesterId, $"💬 پاسخ به پرسش شما دربارهٔ آگهی #{question.AdvertisementId}:\n{question.Answer}",
+                    replyMarkup: new InlineKeyboardMarkup(new[] { new[] { Link("👀 مشاهدهٔ آگهی", $"view_{question.AdvertisementId}") } }), cancellationToken: timeout.Token);
+                current = store.Question(question.Id)!;
+                current.RequesterNotified = true;
+            }
+            store.Update(current);
+            return true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            Log(ex);
+            if (store.Question(question.Id) is { } latest && latest.Answer == question.Answer)
+            {
+                latest.NextNotificationAttemptUtc = DateTime.UtcNow.AddMinutes(5);
+                store.Update(latest);
+            }
+            return false;
+        }
     }
 
     private async Task ShowPrivateSearch(long id, string text, CancellationToken ct)
@@ -668,14 +853,14 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         var matches = market.Search(query).Take(10).ToList();
         if (matches.Count == 0) await bot.SendMessage(id, "آگهی مرتبطی پیدا نشد.", cancellationToken: ct);
         foreach (var found in matches)
-            await bot.SendMessage(id, Card(found), replyMarkup: CardButtons(found), cancellationToken: ct);
+            await bot.SendMessage(id, Card(found), replyMarkup: CardButtons(found, id), cancellationToken: ct);
     }
 
     private async Task<bool> HandlePrivateMenu(long id, string text, string? username, UserSession session, CancellationToken ct)
     {
         if (text is not ("💰 فروش غذا" or "🛒 خرید غذا" or "🔄 معاوضه" or "🔍 جستجوی غذا" or
-            "📋 آگهی‌های من" or "🤝 معاملات من" or "⭐ پروفایل و اعتبار" or "⚙️ تنظیمات" or
-            "💬 پشتیبانی" or "🏠 منوی اصلی" or "🛠 پنل مدیریت")) return false;
+            "📋 آگهی‌های من" or "🤝 معاملات من" or "💬 پرسش‌های آگهی‌ها" or "⭐ پروفایل و اعتبار" or "⚙️ تنظیمات" or
+            "💬 پشتیبانی" or "ℹ️ راهنما" or "🏠 منوی اصلی" or "🛠 پنل مدیریت")) return false;
         session.EditingField = null;
         store.Save(session);
         switch (text)
@@ -689,9 +874,11 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
                 break;
             case "📋 آگهی‌های من": await MyListings(id, 0, ct); break;
             case "🤝 معاملات من": await UserTransactions(id, 0, ct); break;
+            case "💬 پرسش‌های آگهی‌ها": await ShowQuestions(id, ct); break;
             case "⭐ پروفایل و اعتبار": await StartParameter(id, $"profile_{id}", ct); break;
             case "⚙️ تنظیمات": await UserSettings(id, ct); break;
             case "💬 پشتیبانی": await BeginSupport(id, ct); break;
+            case "ℹ️ راهنما": await ShowHelp(id, ct); break;
             case "🏠 منوی اصلی": await StartParameter(id, "", ct); break;
             case "🛠 پنل مدیریت" when IsAdmin(id): await AdminMenu(id, ct); break;
         }
@@ -702,6 +889,18 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
     {
         var id = callback.From.Id;
         var data = callback.Data ?? "";
+        if (store.User(id)?.Suspended == true && data is not ("support" or "help") &&
+            !data.StartsWith("support_ticket_", StringComparison.Ordinal) &&
+            !data.StartsWith("support_close_", StringComparison.Ordinal) &&
+            !data.StartsWith("ticket_files_", StringComparison.Ordinal) &&
+            !data.StartsWith("confirm_", StringComparison.Ordinal) &&
+            !data.StartsWith("txn_cancel_", StringComparison.Ordinal) &&
+            !data.StartsWith("rate_", StringComparison.Ordinal) &&
+            !data.StartsWith("review_", StringComparison.Ordinal))
+        {
+            await bot.AnswerCallbackQuery(callback.Id, "دسترسی حساب محدود شده است؛ برای پیگیری /support را بزنید.", showAlert: true, cancellationToken: ct);
+            return;
+        }
         if (InlineDraftAction.TryParse(data, out var draftAction) && draftAction is not null)
         {
             if (store.Prefill(draftAction.Token) is null)
@@ -747,7 +946,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         if (store.User(id)?.Onboarded != true) return;
         var s = store.Session(id);
         var ad = Draft(s);
-        if ((data is "publish" or "confirm_price" || data.StartsWith("edit_", StringComparison.Ordinal)) &&
+        if ((data is "publish" or "confirm_price" or "cancel" || data.StartsWith("edit_", StringComparison.Ordinal)) &&
             callback.Message?.MessageId is { } clickedPreview && s.PreviewMessageId is { } latestPreview &&
             clickedPreview != latestPreview)
         {
@@ -760,6 +959,29 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
             await BeginListing(id, callback.From.Username, type, s, ct);
             return;
         }
+        if (data.StartsWith("editad_", StringComparison.Ordinal) && int.TryParse(data[7..], out var editAdId))
+        { await BeginEditListing(id, editAdId, ct); return; }
+        if (data.StartsWith("cancelad_", StringComparison.Ordinal) && int.TryParse(data[9..], out var cancelAdId))
+        {
+            var owned = store.Ad(cancelAdId);
+            if (owned?.OwnerId != id || owned.Status != ListingStatus.Active)
+            { await bot.SendMessage(id, "این آگهی برای لغو در دسترس نیست.", cancellationToken: ct); return; }
+            await bot.SendMessage(id, $"آگهی #{cancelAdId} غیرفعال شود؟ این کار قابل بازگشت نیست.",
+                replyMarkup: new InlineKeyboardMarkup(new[] { new[] { C("⛔ بله، لغو آگهی", $"canceladyes_{cancelAdId}"), C("↩️ نه", "canceladno") } }), cancellationToken: ct);
+            return;
+        }
+        if (data.StartsWith("canceladyes_", StringComparison.Ordinal) && int.TryParse(data[12..], out var confirmedAdId))
+        {
+            if (market.CancelOwnListing(confirmedAdId, id))
+            {
+                await EditShares(confirmedAdId, ct);
+                await bot.SendMessage(id, $"⛔ آگهی #{confirmedAdId} لغو و پیام‌های منتشرشده به‌روز شدند.", cancellationToken: ct);
+            }
+            else await bot.SendMessage(id, "لغو ممکن نیست؛ مالکیت، وضعیت آگهی یا معاملهٔ در جریان را بررسی کن.", cancellationToken: ct);
+            return;
+        }
+        if (data == "canceladno")
+        { await bot.SendMessage(id, "آگهی همچنان فعال است.", cancellationToken: ct); return; }
         if (data.StartsWith("edit_", StringComparison.Ordinal))
         {
             if (ad is null) return;
@@ -795,12 +1017,15 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
             s.DraftJson = null; s.EditingField = null; s.SensitiveNumber = null;
             s.PreviewMessageId = null;
             s.InlineDraftToken = null;
+            s.UpdatingAdvertisementId = null;
             store.Save(s);
-            await bot.SendMessage(id, "آگهی لغو شد.", cancellationToken: ct); return;
+            await bot.SendMessage(id, "پیش‌نویس کنار گذاشته شد؛ آگهی‌های ثبت‌شده تغییری نکردند.", cancellationToken: ct); return;
         }
         if (data == "publish" && ad is not null)
         {
             if (s.SensitiveNumber is not null) { await bot.SendMessage(id, "اول نوع عدد مشکوک را مشخص کنید.", cancellationToken: ct); return; }
+            if (s.UpdatingAdvertisementId is { } updatingId)
+            { await Publish(s, ad, updatingId, ct); return; }
             if (s.DuplicateId is null && market.Duplicate(ad) is { } duplicate)
             {
                 s.DuplicateId = duplicate.Id; store.Save(s);
@@ -812,6 +1037,8 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         }
         if (data is "dup_update" or "dup_new" && ad is not null)
         {
+            if (s.DuplicateId is null)
+            { await bot.SendMessage(id, "این انتخاب قدیمی است؛ دوباره پیش‌نمایش آگهی را باز کن.", cancellationToken: ct); return; }
             await Publish(s, ad, data == "dup_update" ? s.DuplicateId : null, ct); return;
         }
         if (data.StartsWith("sold_", StringComparison.Ordinal) && int.TryParse(data[5..], out var soldId))
@@ -830,6 +1057,10 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         { await MarkCompleted(id, compactFulfilledId, true, ct, callback.InlineMessageId, true); return; }
         if (data.StartsWith("review_", StringComparison.Ordinal) && int.TryParse(data[7..], out var reviewId))
         { await ShowRatingPrompt(id, reviewId, ct); return; }
+        if (data.StartsWith("answer_", StringComparison.Ordinal) && int.TryParse(data[7..], out var questionId))
+        { await BeginAnswer(id, questionId, ct); return; }
+        if (data == "questions" || data.StartsWith("questions_", StringComparison.Ordinal) && int.TryParse(data[10..], out _))
+        { await ShowQuestions(id, ct, data == "questions" ? 0 : int.Parse(data[10..])); return; }
         if (data.StartsWith("confirm_", StringComparison.Ordinal) && int.TryParse(data[8..], out var tId))
         {
             try
@@ -915,6 +1146,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
             await UserSettings(id, ct); return;
         }
         if (data == "support") { await BeginSupport(id, ct); return; }
+        if (data == "help") { await ShowHelp(id, ct); return; }
         if (data.StartsWith("support_ticket_", StringComparison.Ordinal) && int.TryParse(data[15..], out var userTicketId))
         {
             var ticket = store.Ticket(userTicketId);
@@ -981,6 +1213,8 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
     }
 
     private bool IsAdmin(long id) => options.AdminUserId > 0 && id == options.AdminUserId;
+    private void Audit(long actor, string action, long target, string? detail = null) =>
+        store.Save(new AdminAuditEvent { ActorId = actor, Action = action, TargetId = target, Detail = detail });
 
     private async Task MyListings(long id, int page, CancellationToken ct)
     {
@@ -1013,6 +1247,16 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         if ((page + 1) * 5 < transactions.Count) navigation.Add(C("بعدی ➡️", $"transactions_{page + 1}"));
         if (navigation.Count > 0) await bot.SendMessage(id, "صفحهٔ بعد/قبل:", replyMarkup: new InlineKeyboardMarkup(new[] { navigation.ToArray() }), cancellationToken: ct);
     }
+
+    private Task ShowHelp(long userId, CancellationToken ct) => bot.SendMessage(userId,
+        "ℹ️ راهنمای بازار غذا\n\n" +
+        "• متن آگهی مثل «فروشی قیمه بانوان ۱۰۰» را بفرست؛ ۱۰۰ یعنی ۱۰۰ هزار تومان. قیمت اجباری نیست.\n" +
+        "• پیش‌نمایش را بررسی کن و «منتشر کن» را بزن. از «آگهی‌های من» می‌توانی آگهی فعال را ویرایش، در گروه منتشر یا لغو کنی.\n" +
+        "• فقط در گروه نصب‌شده با /food قیمه جست‌وجو کن؛ Inline مستقیم گروهی به‌دلیل نبود شناسهٔ گروه در API تلگرام فعال نیست. در خصوصی از @" + _username + " هم می‌توانی استفاده کنی.\n" +
+        "• برای سؤال دربارهٔ قیمت، دکمهٔ «پرسش از آگهی‌دهنده» را بزن؛ این کار معامله را شروع نمی‌کند.\n" +
+        "• برای شروع معامله دکمهٔ خرید/پیشنهاد را بزن؛ پس از تحویل هر دو طرف معامله را تأیید می‌کنند. کد غذا را فقط در خصوصی و با /code شماره_معامله کد بفرست.\n" +
+        "• برای کنار گذاشتن پیش‌نویس یا خروج از گفتگو /cancel و برای پشتیبانی /support را بزن.",
+        cancellationToken: ct);
 
     private async Task BeginSupport(long id, CancellationToken ct)
     {
@@ -1090,23 +1334,58 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
     private async Task AdminMenu(long id, CancellationToken ct)
     {
         if (!IsAdmin(id)) return;
-        var summary = $"👥 {store.InstalledGroups().Count} گروه | 💬 {store.Tickets().Count(t => t.Status == TicketStatus.Open)} تیکت باز | 🚨 {store.Reports().Count(r => r.Status == ReportStatus.Open)} گزارش باز | 🤝 {store.PendingTransactions().Count} معامله در جریان";
-        await bot.SendMessage(id, $"🛠 پنل مدیریت\n{summary}\n\nمدیریت سلف‌ها، گفتگوها، گزارش‌ها و تنظیمات:", replyMarkup: new InlineKeyboardMarkup(new[]
+        var ads = store.AllAds();
+        var users = store.Users();
+        var summary = $"👥 گروه مجاز: {store.InstalledGroups().Count} | 👤 کاربر: {users.Count} (محدود: {users.Count(u => u.Suspended)})\n" +
+            $"📋 آگهی فعال: {ads.Count(a => a.Status == ListingStatus.Active && !market.IsExpired(a) && store.User(a.OwnerId)?.Suspended != true)} | ✅ تکمیل‌شده: {ads.Count(a => a.Status == ListingStatus.Sold)}\n" +
+            $"💬 تیکت باز: {store.Tickets().Count(t => t.Status == TicketStatus.Open)} | 🚨 گزارش باز: {store.Reports().Count(r => r.Status == ReportStatus.Open)} | 🤝 معاملهٔ در جریان: {store.PendingTransactions().Count}";
+        await bot.SendMessage(id, $"🛠 پنل مدیریت\n{summary}\n\nبخش موردنظر را انتخاب کن:", replyMarkup: new InlineKeyboardMarkup(new[]
         {
             new[] { C("📍 مدیریت محل‌های سلف", "adm_caf_0") },
             new[] { C("👥 گروه‌های نصب‌شده", "adm_groups_0") },
+            new[] { C("📋 آگهی‌های فعال", "adm_ads_0"), C("👤 کاربران", "adm_users_0") },
             new[] { C("💬 گفتگوهای پشتیبانی", "adm_tickets_0"), C("🚨 گزارش‌ها", "adm_reports_0") },
             new[] { C("🤝 معاملات در جریان", "adm_pending_0") },
-            new[] { C("⚙️ تنظیمات سامانه", "adm_settings") }
+            new[] { C("⚙️ تنظیمات سامانه", "adm_settings"), C("🧾 اقدامات مدیر", "adm_audit_0") }
         }), cancellationToken: ct);
+    }
+
+    private async Task AdminAuditLog(long id, int page, CancellationToken ct)
+    {
+        if (!IsAdmin(id)) return;
+        var events = store.AdminAudits();
+        page = Math.Clamp(page, 0, Math.Max(0, (events.Count - 1) / 10));
+        var names = new Dictionary<string, string>
+        {
+            ["user_suspend"] = "محدودسازی کاربر", ["user_restore"] = "رفع محدودیت کاربر",
+            ["group_install"] = "نصب گروه", ["group_uninstall"] = "حذف نصب از گروه",
+            ["group_disable"] = "غیرفعال‌سازی گروه", ["ad_disable"] = "غیرفعال‌سازی آگهی",
+            ["report_resolve"] = "رسیدگی به گزارش", ["report_dismiss"] = "رد گزارش",
+            ["report_remove"] = "حذف آگهی گزارش‌شده", ["transaction_cancel"] = "لغو معامله",
+            ["cafeteria_update"] = "تغییر سلف", ["setting_update"] = "تغییر تنظیمات"
+        };
+        var lines = events.Skip(page * 10).Take(10).Select(e =>
+            $"{e.CreatedUtc:yyyy/MM/dd HH:mm} UTC | {names.GetValueOrDefault(e.Action, e.Action)} | شناسه {e.TargetId} | مدیر {e.ActorId}" +
+            (e.Detail is null ? "" : $" | {e.Detail}"));
+        var navigation = new List<InlineKeyboardButton>();
+        if (page > 0) navigation.Add(C("⬅️ قبلی", $"adm_audit_{page - 1}"));
+        if ((page + 1) * 10 < events.Count) navigation.Add(C("بعدی ➡️", $"adm_audit_{page + 1}"));
+        var rows = new List<InlineKeyboardButton[]>();
+        if (navigation.Count > 0) rows.Add(navigation.ToArray());
+        rows.Add([C("↩️ مدیریت", "adm_home")]);
+        await bot.SendMessage(id, events.Count == 0 ? "هنوز اقدامی ثبت نشده است." :
+            $"🧾 اقدامات مدیر | صفحهٔ {page + 1}\n" + string.Join("\n", lines),
+            replyMarkup: new InlineKeyboardMarkup(rows), cancellationToken: ct);
     }
 
     private async Task AdminGroups(long id, int page, CancellationToken ct)
     {
         if (!IsAdmin(id)) return;
-        var groups = store.InstalledGroups();
+        var groups = store.AllGroups();
         page = Math.Clamp(page, 0, Math.Max(0, (groups.Count - 1) / 8));
-        var rows = groups.Skip(page * 8).Take(8).Select(g => new[] { C($"⛔ حذف {g.Title}", $"adm_group_off_{g.Id}") }).ToList();
+        var rows = groups.Skip(page * 8).Take(8).Select(g => g.Active
+            ? new[] { C($"✅ {g.Title}", $"adm_group_info_{g.Id}"), C("⛔ حذف", $"adm_group_offask_{g.Id}") }
+            : new[] { C($"⛔ {g.Title}", $"adm_group_info_{g.Id}") }).ToList();
         var navigation = new List<InlineKeyboardButton>();
         if (page > 0) navigation.Add(C("⬅️ قبلی", $"adm_groups_{page - 1}"));
         if ((page + 1) * 8 < groups.Count) navigation.Add(C("بعدی ➡️", $"adm_groups_{page + 1}"));
@@ -1114,7 +1393,75 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         rows.Add([C("↩️ مدیریت", "adm_home")]);
         await bot.SendMessage(id, groups.Count == 0
             ? "هیچ گروهی نصب نشده است. در گروه موردنظر «نصب» بنویس. ربات باید پیام‌های گروه را دریافت کند."
-            : "👥 گروه‌های مجاز؛ برای نصب، خودت در گروه «نصب» بنویس. حذف از اینجا یا با «حذف نصب» در گروه انجام می‌شود.",
+            : "👥 گروه‌های ثبت‌شده؛ گروه غیرفعال فقط با پیام «نصب» خود مدیر در همان گروه دوباره فعال می‌شود.",
+            replyMarkup: new InlineKeyboardMarkup(rows), cancellationToken: ct);
+    }
+
+    private async Task AdminAds(long id, int page, CancellationToken ct)
+    {
+        if (!IsAdmin(id)) return;
+        var ads = store.AllAds().Where(a => a.Status == ListingStatus.Active).ToList();
+        page = Math.Clamp(page, 0, Math.Max(0, (ads.Count - 1) / 8));
+        var rows = ads.Skip(page * 8).Take(8).Select(a => new[]
+        { C($"#{a.Id} · {Header(a)[..Math.Min(30, Header(a).Length)]}", $"adm_ad_{a.Id}") }).ToList();
+        var navigation = new List<InlineKeyboardButton>();
+        if (page > 0) navigation.Add(C("⬅️ قبلی", $"adm_ads_{page - 1}"));
+        if ((page + 1) * 8 < ads.Count) navigation.Add(C("بعدی ➡️", $"adm_ads_{page + 1}"));
+        if (navigation.Count > 0) rows.Add(navigation.ToArray());
+        rows.Add([C("🔎 پیدا کردن شناسه", "adm_lookup"), C("↩️ مدیریت", "adm_home")]);
+        await bot.SendMessage(id, ads.Count == 0 ? "آگهی فعالی وجود ندارد. با جست‌وجوی شناسه می‌توانی آگهی‌های بسته‌شده را هم ببینی." :
+            $"📋 آگهی‌های فعال: {ads.Count} | صفحهٔ {page + 1}", replyMarkup: new InlineKeyboardMarkup(rows), cancellationToken: ct);
+    }
+
+    private async Task AdminAdDetails(long id, int adId, CancellationToken ct)
+    {
+        if (!IsAdmin(id)) return;
+        var ad = store.Ad(adId);
+        if (ad is null) { await bot.SendMessage(id, "آگهی پیدا نشد.", cancellationToken: ct); return; }
+        var pending = store.TransactionsForAd(adId).Any(t => t.Status == TransactionStatus.Pending);
+        var rows = new List<InlineKeyboardButton[]>
+        {
+            new[] { C("👤 مالک", $"adm_user_{ad.OwnerId}"), C("↩️ آگهی‌ها", "adm_ads_0") }
+        };
+        if (ad.Status == ListingStatus.Active && !pending)
+            rows.Insert(0, [C("⛔ غیرفعال‌سازی آگهی", $"adm_adask_{ad.Id}")]);
+        await bot.SendMessage(id, $"📋 آگهی #{ad.Id} | کاربر {ad.OwnerId} | {ad.Status} | پیام‌های ثبت‌شده: {store.Shares(ad.Id).Count}" +
+            (pending ? "\n🤝 معاملهٔ در جریان دارد؛ ابتدا از بخش معاملات تعیین‌تکلیف کن." : "") + "\n\n" + Card(ad),
+            replyMarkup: new InlineKeyboardMarkup(rows), cancellationToken: ct);
+    }
+
+    private async Task AdminUsers(long id, int page, CancellationToken ct)
+    {
+        if (!IsAdmin(id)) return;
+        var users = store.Users();
+        page = Math.Clamp(page, 0, Math.Max(0, (users.Count - 1) / 8));
+        var rows = users.Skip(page * 8).Take(8).Select(u => new[]
+        { C($"{(u.Suspended ? "⛔" : "👤")} {u.Id} · @{u.Username ?? "بدون‌نام"}", $"adm_user_{u.Id}") }).ToList();
+        var navigation = new List<InlineKeyboardButton>();
+        if (page > 0) navigation.Add(C("⬅️ قبلی", $"adm_users_{page - 1}"));
+        if ((page + 1) * 8 < users.Count) navigation.Add(C("بعدی ➡️", $"adm_users_{page + 1}"));
+        if (navigation.Count > 0) rows.Add(navigation.ToArray());
+        rows.Add([C("🔎 جست‌وجوی شناسهٔ کاربر", "adm_userlookup"), C("↩️ مدیریت", "adm_home")]);
+        await bot.SendMessage(id, users.Count == 0 ? "کاربری ثبت نشده است." : $"👤 کاربران: {users.Count} | صفحهٔ {page + 1}",
+            replyMarkup: new InlineKeyboardMarkup(rows), cancellationToken: ct);
+    }
+
+    private async Task AdminUserDetails(long id, long userId, CancellationToken ct)
+    {
+        if (!IsAdmin(id)) return;
+        var user = store.User(userId);
+        if (user is null) { await bot.SendMessage(id, "کاربر پیدا نشد.", cancellationToken: ct); return; }
+        var ads = store.AdsFor(userId);
+        var rows = new List<InlineKeyboardButton[]>
+        {
+            new[] { C("↩️ کاربران", "adm_users_0") }
+        };
+        if (userId != options.AdminUserId)
+            rows.Insert(0, [C(user.Suspended ? "✅ رفع محدودیت" : "⛔ محدودسازی حساب",
+                user.Suspended ? $"adm_restore_{userId}" : $"adm_suspendask_{userId}")]);
+        await bot.SendMessage(id, $"👤 کاربر {userId} | @{user.Username ?? "بدون‌نام"}\n" +
+            $"وضعیت: {(user.Suspended ? "⛔ محدود" : "✅ فعال")} | اعتبار: {user.TrustScore}/100 | امتیاز: {user.Rating:0.0}\n" +
+            $"آگهی‌ها: {ads.Count} (فعال: {ads.Count(a => a.Status == ListingStatus.Active)}) | تیکت‌ها: {store.TicketsFor(userId).Count} | گزارش تخلف تأییدشده: {user.ConfirmedReports}",
             replyMarkup: new InlineKeyboardMarkup(rows), cancellationToken: ct);
     }
 
@@ -1203,19 +1550,37 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
 
     private async Task<bool> AdminInput(long id, string field, string text, UserSession session, CancellationToken ct)
     {
+        if (field == "adminlookup")
+        {
+            var value = PersianText.Normalize(text).Trim().TrimStart('F', 'B', 'E', 'f', 'b', 'e');
+            if (!int.TryParse(value, out var adId) || adId <= 0)
+            { await bot.SendMessage(id, "شناسهٔ عددی آگهی را بفرست (مثلاً ۱۲ یا F12).", cancellationToken: ct); return true; }
+            session.EditingField = null; store.Save(session);
+            await AdminAdDetails(id, adId, ct); return true;
+        }
+        if (field == "adminuserlookup")
+        {
+            if (!long.TryParse(PersianText.Normalize(text), out var userId) || userId <= 0)
+            { await bot.SendMessage(id, "شناسهٔ عددی کاربر را بفرست.", cancellationToken: ct); return true; }
+            session.EditingField = null; store.Save(session);
+            await AdminUserDetails(id, userId, ct); return true;
+        }
         if (field == "caf_add")
         {
             if (!_admin.AddCafeteria(text)) { await bot.SendMessage(id, "نام محل باید بین ۲ تا ۶۰ نویسه باشد.", cancellationToken: ct); return true; }
+            Audit(id, "cafeteria_update", 0, text[..Math.Min(text.Length, 60)]);
             session.EditingField = null; store.Save(session); await CafeteriaMenu(id, 0, ct); return true;
         }
         if (field.StartsWith("caf_rename:", StringComparison.Ordinal) && int.TryParse(field[11..], out var cafeteriaId))
         {
             if (!_admin.RenameCafeteria(cafeteriaId, text)) { await bot.SendMessage(id, "نام تکراری یا نامعتبر است؛ نام دیگری وارد کن.", cancellationToken: ct); return true; }
+            Audit(id, "cafeteria_update", cafeteriaId, text[..Math.Min(text.Length, 60)]);
             session.EditingField = null; store.Save(session); await CafeteriaMenu(id, 0, ct); return true;
         }
         if (field.StartsWith("setting:", StringComparison.Ordinal))
         {
             if (!_admin.TryUpdateSetting(field[8..], text)) { await bot.SendMessage(id, "مقدار نامعتبر است؛ برای ساعت HH:mm و برای منطقهٔ زمانی مثلاً Asia/Tehran وارد کن.", cancellationToken: ct); return true; }
+            Audit(id, "setting_update", 0, $"{field[8..]}: {text[..Math.Min(text.Length, 60)]}");
             session.EditingField = null; store.Save(session); await AdminSettings(id, ct); return true;
         }
         return false;
@@ -1225,13 +1590,87 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
     {
         if (!IsAdmin(id) || !data.StartsWith("adm_", StringComparison.Ordinal)) return false;
         if (data == "adm_home") { await AdminMenu(id, ct); return true; }
+        if (data.StartsWith("adm_audit_", StringComparison.Ordinal) && int.TryParse(data[10..], out var auditPage))
+        { await AdminAuditLog(id, auditPage, ct); return true; }
+        if (data.StartsWith("adm_ads_", StringComparison.Ordinal) && int.TryParse(data[8..], out var adsPage))
+        { await AdminAds(id, adsPage, ct); return true; }
+        if (data == "adm_lookup")
+        {
+            session.EditingField = "adminlookup"; store.Save(session);
+            await bot.SendMessage(id, "شناسهٔ آگهی را بفرست (برای خروج /cancel).", cancellationToken: ct); return true;
+        }
+        if (data.StartsWith("adm_adask_", StringComparison.Ordinal) && int.TryParse(data[10..], out var askAdId))
+        {
+            var ad = store.Ad(askAdId);
+            if (ad?.Status != ListingStatus.Active)
+            { await bot.SendMessage(id, "این آگهی دیگر فعال نیست.", cancellationToken: ct); return true; }
+            await bot.SendMessage(id, $"آگهی #{askAdId} غیرفعال شود؟ این اقدام از جست‌وجو حذفش می‌کند و به مالک اطلاع می‌دهد.",
+                replyMarkup: new InlineKeyboardMarkup(new[] { new[] { C("⛔ تأیید غیرفعال‌سازی", $"adm_adcancel_{askAdId}"), C("↩️ انصراف", $"adm_ad_{askAdId}") } }), cancellationToken: ct);
+            return true;
+        }
+        if (data.StartsWith("adm_adcancel_", StringComparison.Ordinal) && int.TryParse(data[13..], out var cancelledAdId))
+        {
+            if (!market.CancelListing(cancelledAdId))
+            { await bot.SendMessage(id, "آگهی فعال نیست یا معاملهٔ در جریان دارد؛ ابتدا معامله را تعیین‌تکلیف کن.", cancellationToken: ct); return true; }
+            Audit(id, "ad_disable", cancelledAdId);
+            await EditShares(cancelledAdId, ct);
+            await bot.SendMessage(id, $"⛔ آگهی #{cancelledAdId} غیرفعال شد.", cancellationToken: ct);
+            try { await bot.SendMessage(store.Ad(cancelledAdId)!.OwnerId, $"⛔ آگهی #{cancelledAdId} توسط مدیر غیرفعال شد. برای پیگیری /support را بزن.", cancellationToken: ct); }
+            catch (Exception ex) { Log(ex); }
+            return true;
+        }
+        if (data.StartsWith("adm_ad_", StringComparison.Ordinal) && int.TryParse(data[7..], out var adDetailsId))
+        { await AdminAdDetails(id, adDetailsId, ct); return true; }
+        if (data.StartsWith("adm_users_", StringComparison.Ordinal) && int.TryParse(data[10..], out var usersPage))
+        { await AdminUsers(id, usersPage, ct); return true; }
+        if (data == "adm_userlookup")
+        {
+            session.EditingField = "adminuserlookup"; store.Save(session);
+            await bot.SendMessage(id, "شناسهٔ عددی کاربر را بفرست (برای خروج /cancel).", cancellationToken: ct); return true;
+        }
+        if (data.StartsWith("adm_suspendask_", StringComparison.Ordinal) && long.TryParse(data[15..], out var askUserId))
+        {
+            await bot.SendMessage(id, $"حساب کاربر {askUserId} محدود شود؟ آگهی‌هایش از جست‌وجو پنهان می‌شوند؛ معاملات جاری را همچنان می‌تواند تکمیل کند.",
+                replyMarkup: new InlineKeyboardMarkup(new[] { new[] { C("⛔ تأیید محدودسازی", $"adm_suspend_{askUserId}"), C("↩️ انصراف", $"adm_user_{askUserId}") } }), cancellationToken: ct);
+            return true;
+        }
+        if (data.StartsWith("adm_suspend_", StringComparison.Ordinal) && long.TryParse(data[12..], out var suspendedId) ||
+            data.StartsWith("adm_restore_", StringComparison.Ordinal) && long.TryParse(data[12..], out suspendedId))
+        {
+            var suspended = data.StartsWith("adm_suspend_", StringComparison.Ordinal);
+            if (!_admin.SetUserSuspended(id, suspendedId, suspended))
+            { await bot.SendMessage(id, "تغییر وضعیت کاربر مجاز نیست.", cancellationToken: ct); return true; }
+            foreach (var ad in store.AdsFor(suspendedId).Where(a => a.Status == ListingStatus.Active)) await EditShares(ad.Id, ct);
+            await AdminUserDetails(id, suspendedId, ct);
+            try { await bot.SendMessage(suspendedId, suspended
+                ? "⛔ حساب شما موقتاً محدود شد. برای پیگیری /support را بزنید. معاملات در جریان قابل تکمیل‌اند."
+                : "✅ محدودیت حساب شما برداشته شد.", cancellationToken: ct); }
+            catch (Exception ex) { Log(ex); }
+            return true;
+        }
+        if (data.StartsWith("adm_user_", StringComparison.Ordinal) && long.TryParse(data[9..], out var userDetailsId))
+        { await AdminUserDetails(id, userDetailsId, ct); return true; }
         if (data.StartsWith("adm_groups_", StringComparison.Ordinal) && int.TryParse(data[11..], out var groupPage))
         { await AdminGroups(id, groupPage, ct); return true; }
+        if (data.StartsWith("adm_group_info_", StringComparison.Ordinal) && long.TryParse(data[15..], out var groupInfoId))
+        {
+            var group = store.Group(groupInfoId);
+            if (group is not null)
+                await bot.SendMessage(id, $"👥 {group.Title}\nشناسه: {group.Id}\nوضعیت: {(group.Active ? "فعال" : "غیرفعال")}\nنصب‌کننده: {group.InstalledBy}\nتاریخ ثبت: {group.InstalledUtc:yyyy/MM/dd HH:mm} UTC\nپیام‌های ثبت‌شده: {store.SharesForGroup(group.Id).Count}", cancellationToken: ct);
+            return true;
+        }
+        if (data.StartsWith("adm_group_offask_", StringComparison.Ordinal) && long.TryParse(data[17..], out var askGroupId))
+        {
+            await bot.SendMessage(id, $"گروه {store.Group(askGroupId)?.Title ?? askGroupId.ToString()} غیرفعال شود؟ پیام‌های قبلی هم بدون دکمه می‌شوند.",
+                replyMarkup: new InlineKeyboardMarkup(new[] { new[] { C("⛔ بله، حذف نصب", $"adm_group_off_{askGroupId}"), C("↩️ انصراف", "adm_groups_0") } }), cancellationToken: ct);
+            return true;
+        }
         if (data.StartsWith("adm_group_off_", StringComparison.Ordinal) && long.TryParse(data[14..], out var disabledGroupId))
         {
             if (store.Group(disabledGroupId) is { Active: true } disabled)
             {
                 disabled.Active = false; store.Save(disabled);
+                Audit(id, "group_disable", disabledGroupId);
                 await DisableGroupShares(disabledGroupId, ct);
             }
             await AdminGroups(id, 0, ct);
@@ -1247,7 +1686,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         if (data.StartsWith("adm_toggle_", StringComparison.Ordinal) && int.TryParse(data[11..], out var toggleId))
         {
             var found = store.Cafeterias().FirstOrDefault(c => c.Id == toggleId);
-            if (found is not null) store.SetCafeteriaActive(toggleId, !found.Active);
+            if (found is not null && store.SetCafeteriaActive(toggleId, !found.Active)) Audit(id, "cafeteria_update", toggleId, found.Active ? "غیرفعال" : "فعال");
             await CafeteriaMenu(id, 0, ct); return true;
         }
         if (data.StartsWith("adm_rename_", StringComparison.Ordinal) && int.TryParse(data[11..], out var renameId))
@@ -1264,6 +1703,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
             try
             {
                 var t = market.CancelTransaction(pendingId, id);
+                Audit(id, "transaction_cancel", pendingId);
                 await bot.SendMessage(id, $"معامله #{t.Id} لغو شد.", cancellationToken: ct);
                 foreach (var participant in new[] { t.OwnerId, t.CounterpartyId })
                     try { await bot.SendMessage(participant, $"❌ معامله #{t.Id} توسط مدیر لغو شد. برای پیگیری /support را بزنید.", cancellationToken: ct); }
@@ -1298,11 +1738,13 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
                     return true;
                 }
                 await EditShares(report.AdvertisementId, ct);
+                Audit(id, "report_remove", report.AdvertisementId);
                 var ad = store.Ad(report.AdvertisementId)!;
                 try { await bot.SendMessage(ad.OwnerId, $"⛔ آگهی #{ad.Id} پس از بررسی گزارش غیرفعال شد. برای پیگیری /support را بزنید.", cancellationToken: ct); }
                 catch (Exception ex) { Log(ex); }
             }
             report.Status = status; store.Update(report);
+            Audit(id, status == ReportStatus.Dismissed ? "report_dismiss" : "report_resolve", report.Id);
             await bot.SendMessage(id, "وضعیت گزارش ثبت شد.", cancellationToken: ct);
             try { await bot.SendMessage(report.ReporterId, $"نتیجهٔ بررسی گزارش #{report.Id}: {(status == ReportStatus.Dismissed ? "رد شد" : "رسیدگی شد")}. برای پیگیری /support را بزنید.", cancellationToken: ct); }
             catch (Exception ex) { Log(ex); }
@@ -1320,7 +1762,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         if (data.StartsWith("adm_setting_", StringComparison.Ordinal))
         {
             session.EditingField = "setting:" + data[12..]; store.Save(session);
-            await bot.SendMessage(id, "مقدار جدید را بفرست. ساعت: HH:mm؛ دقیقه/ضریب: عدد صحیح؛ منطقهٔ زمانی: Asia/Tehran. لغو: /cancel", cancellationToken: ct);
+            await bot.SendMessage(id, "مقدار جدید را بفرست. ساعت: HH:mm؛ فاصله‌ها: عدد صحیح؛ منطقهٔ زمانی: Asia/Tehran. لغو: /cancel", cancellationToken: ct);
             return true;
         }
         return true;
@@ -1334,6 +1776,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         var inlineDraftToken = session.InlineDraftToken;
         session.DraftJson = null; session.DuplicateId = null; session.PreviewMessageId = null;
         session.InlineDraftToken = null;
+        session.UpdatingAdvertisementId = null;
         store.Save(session);
         var updated = false;
         if (previewMessageId is { } messageId)
@@ -1410,7 +1853,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         { await bot.SendMessage(userId, "باید عضو گروه باشی و ربات برای بررسی عضویت ادمین گروه باشد.", cancellationToken: ct); return; }
         try
         {
-            var old = store.Shares(adId).FirstOrDefault(s => s.GroupChatId == groupId && s.GroupMessageId.HasValue);
+            var old = store.Shares(adId).FirstOrDefault(s => s.GroupChatId == groupId && s.GroupMessageId.HasValue && !s.GroupSearchResult);
             if (old is not null)
             {
                 try
@@ -1472,7 +1915,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
     private async Task Inline(InlineQuery inline, CancellationToken ct)
     {
         var scope = GroupAccess.GetInlineScope(inline.ChatType);
-        if (scope == InlineScope.None)
+        if (scope == InlineScope.None || store.User(inline.From.Id)?.Suspended == true)
         {
             await bot.AnswerInlineQuery(inline.Id, Array.Empty<InlineQueryResult>(), cacheTime: 0, isPersonal: true, cancellationToken: ct);
             return;
@@ -1528,29 +1971,10 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
                     })
                 });
             }
-            if (scope == InlineScope.GroupPrivateLinks)
-            {
-                // Telegram supplies the chat type but not its ID. Only private deep links can be
-                // shared inline in a group; full listing cards are posted by PostInGroup after authorization.
-                var searchLink = $"https://t.me/{_username}?start=" +
-                    (draftToken is null ? "home" : "search_" + draftToken);
-                results.Add(new InlineQueryResultArticle("search_private", "🔍 جستجوی آگهی‌ها در خصوصی",
-                    new InputTextMessageContent("🔍 آگهی‌های مرتبط را در چت خصوصی ربات ببین."))
-                { Description = "انتشار رسمی فقط در گروه نصب‌شده", ReplyMarkup = new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithUrl("🔍 مشاهدهٔ آگهی‌ها", searchLink) } }) });
-                if (query.Length > 0)
-                    foreach (var ad in market.Search(parsed).Take(10))
-                    {
-                        results.Add(new InlineQueryResultArticle($"view_{ad.Id}", Header(ad),
-                            new InputTextMessageContent(CompactInlineCard(ad)) { ParseMode = ParseMode.Html })
-                        { Description = $"{GenderName(ad.Gender)} · {MealName(ad.Meal)} · {PriceName(ad.Price)}",
-                          ReplyMarkup = CardButtons(ad, inline.From.Id, compact: true) });
-                    }
-            }
-            else
-                foreach (var ad in market.Search(parsed).Take(20))
-                    results.Add(new InlineQueryResultArticle($"ad_{ad.Id}", Header(ad), new InputTextMessageContent(InlineCard(ad)) { ParseMode = ParseMode.Html })
-                    { Description = $"{GenderName(ad.Gender)} · {MealName(ad.Meal)} · {PriceName(ad.Price)}",
-                      ReplyMarkup = CardButtons(ad, inline.From.Id) });
+            foreach (var ad in market.Search(parsed).Take(20))
+                results.Add(new InlineQueryResultArticle($"ad_{ad.Id}", Header(ad), new InputTextMessageContent(InlineCard(ad)) { ParseMode = ParseMode.Html })
+                { Description = $"{GenderName(ad.Gender)} · {MealName(ad.Meal)} · {PriceName(ad.Price)}",
+                  ReplyMarkup = CardButtons(ad, inline.From.Id) });
         }
         await bot.AnswerInlineQuery(inline.Id, results, cacheTime: 0, isPersonal: true, cancellationToken: ct);
     }

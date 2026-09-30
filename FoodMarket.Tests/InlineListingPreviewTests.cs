@@ -113,10 +113,11 @@ public sealed class InlineListingPreviewTests
     {
         using var store = new MarketStore(new MarketOptions { DatabasePath = ":memory:" });
         store.Save(new UserSession { Id = 42, PreviewMessageId = 100,
-            InlineDraftToken = "1234567890abcdef" });
+            InlineDraftToken = "1234567890abcdef", UpdatingAdvertisementId = 25 });
         var session = store.Session(42);
         Assert.Equal(100, session.PreviewMessageId);
         Assert.Equal("1234567890abcdef", session.InlineDraftToken);
+        Assert.Equal(25, session.UpdatingAdvertisementId);
     }
 
     [Theory]
@@ -127,5 +128,15 @@ public sealed class InlineListingPreviewTests
         var result = ListingCardStatus.Completed("🍛 قیمه <قیمت>\n👤 @seller\n🆔 #F12", type);
         Assert.Equal("<s>" + System.Net.WebUtility.HtmlEncode("🍛 قیمه <قیمت>\n👤 @seller\n🆔 #F12") +
             "</s>\n" + status, result);
+    }
+
+    [Theory]
+    [InlineData(ListingStatus.Cancelled, "⛔ آگهی لغو شد")]
+    [InlineData(ListingStatus.Expired, "⌛ منقضی شد")]
+    public void Inactive_inline_card_strikes_details_but_not_the_status(ListingStatus status, string label)
+    {
+        var text = "🍛 قیمه\n💵 ۱۰۰٬۰۰۰ تومان\n🆔 #F12";
+        Assert.Equal("<s>" + System.Net.WebUtility.HtmlEncode(text) + "</s>\n" + label,
+            ListingCardStatus.Inactive(text, status));
     }
 }

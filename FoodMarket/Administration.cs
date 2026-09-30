@@ -62,6 +62,16 @@ public sealed class SupportService(MarketStore store, long adminUserId, TimeProv
 
 public sealed class Administration(MarketStore store, MarketOptions options)
 {
+    public bool SetUserSuspended(long actor, long userId, bool suspended)
+    {
+        if (options.AdminUserId <= 0 || actor != options.AdminUserId || userId == options.AdminUserId ||
+            store.User(userId) is not { } user) return false;
+        user.Suspended = suspended;
+        store.Save(user);
+        store.Save(new AdminAuditEvent { ActorId = actor, Action = suspended ? "user_suspend" : "user_restore", TargetId = userId });
+        return true;
+    }
+
     public bool TryUpdateSetting(string key, string input)
     {
         var value = PersianText.Normalize(input);

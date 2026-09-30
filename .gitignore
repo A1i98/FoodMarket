@@ -9,6 +9,7 @@
 *.coverage
 *.coveragexml
 coverage/
+artifacts/
 
 # Editor and operating-system files
 .vs/

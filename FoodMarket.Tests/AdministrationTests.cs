@@ -133,4 +133,35 @@ public sealed class AdministrationTests
         Assert.Equal(40, store.User(1)?.TrustScore);
         Assert.Empty(market.Search(new ParsedListingResult { OriginalText = "" }));
     }
+
+    [Fact]
+    public async Task Only_admin_can_suspend_a_user_without_breaking_an_existing_trade()
+    {
+        var options = new MarketOptions { DatabasePath = ":memory:", AdminUserId = 9 };
+        using var store = new MarketStore(options);
+        var market = new Marketplace(store, options);
+        var admin = new Administration(store, options);
+        store.Save(new MarketUser { Id = 1, Onboarded = true });
+        store.Save(new MarketUser { Id = 2, Onboarded = true });
+        store.Save(new MarketUser { Id = 9, Onboarded = true });
+        var date = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTime.UtcNow.AddDays(1), TimeZoneInfo.FindSystemTimeZoneById(options.TimeZone)));
+        var first = market.Publish(new Advertisement { OwnerId = 1, Type = ListingType.Sell, FoodName = "قیمه", Date = date });
+        var second = market.Publish(new Advertisement { OwnerId = 1, Type = ListingType.Sell, FoodName = "ساندویچ", Date = date });
+        var trade = market.StartTransaction(first.Id, 2);
+        Assert.False(admin.SetUserSuspended(2, 1, true));
+        Assert.False(admin.SetUserSuspended(9, 9, true));
+        Assert.True(admin.SetUserSuspended(9, 1, true));
+        Assert.Contains(store.AdminAudits(), e => e.ActorId == 9 && e.TargetId == 1 && e.Action == "user_suspend");
+        Assert.True(store.User(1)?.Suspended);
+        Assert.Empty(market.Search(new ParsedListingResult { OriginalText = "" }));
+        Assert.Throws<InvalidOperationException>(() => market.Publish(new Advertisement { OwnerId = 1, Type = ListingType.Sell, FoodName = "برنج", Date = date }));
+        Assert.Throws<InvalidOperationException>(() => market.StartTransaction(second.Id, 2));
+        Assert.Throws<InvalidOperationException>(() => market.AskQuestion(second.Id, 2, "قیمت؟"));
+        Assert.Equal(TransactionStatus.Pending, market.ConfirmDelivery(trade.Id, 1).Status);
+        Assert.Equal(TransactionStatus.Completed, market.ConfirmDelivery(trade.Id, 2).Status);
+        Assert.True(admin.SetUserSuspended(9, 1, false));
+        Assert.Contains(store.AdminAudits(), e => e.ActorId == 9 && e.TargetId == 1 && e.Action == "user_restore");
+        var parser = new RuleBasedPersianFoodListingParser(options, store.Locations);
+        Assert.Contains(market.Search(await parser.ParseAsync("ساندویچ", CancellationToken.None)), a => a.Id == second.Id);
+    }
 }
