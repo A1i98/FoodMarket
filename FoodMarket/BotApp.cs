@@ -57,6 +57,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         if (self.SupportsInlineQueries != true) Console.Error.WriteLine("Enable Inline Mode in BotFather with /setinline.");
         if (self.CanReadAllGroupMessages != true) Console.Error.WriteLine("Plain نصب in groups needs BotFather /setprivacy Disabled (or use /install).");
         using var timer = new PeriodicTimer(TimeSpan.FromMinutes(1));
+        await CleanUpOldListings(ct);
         bot.StartReceiving(HandleUpdate, HandleError, receiverOptions: new ReceiverOptions
         {
             AllowedUpdates = [UpdateType.Message, UpdateType.CallbackQuery, UpdateType.InlineQuery,
@@ -64,7 +65,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         }, cancellationToken: ct);
         while (await timer.WaitForNextTickAsync(ct))
         {
-            foreach (var id in market.Expire()) await EditShares(id, ct);
+            await CleanUpOldListings(ct);
             foreach (var pending in store.UnsyncedPublishedInlineDrafts().DistinctBy(m => (m.OwnerId, m.Token)).Take(20))
                 if (store.InlineDraftMessages(pending.OwnerId, pending.Token).FirstOrDefault(m => m.PublishedAdvertisementId.HasValue) is { } draft &&
                     store.Ad(draft.PublishedAdvertisementId!.Value) is { } published)
@@ -993,7 +994,7 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
             if (market.CancelOwnListing(confirmedAdId, id))
             {
                 await EditShares(confirmedAdId, ct);
-                await bot.SendMessage(id, $"⛔ آگهی {ListingId(confirmedAdId)} لغو و پیام‌های منتشرشده به‌روز شدند.", cancellationToken: ct);
+                await bot.SendMessage(id, $"⛔ آگهی {ListingId(confirmedAdId)} لغو و پیام‌های منتشرشده حذف/غیرفعال شدند.", cancellationToken: ct);
             }
             else await bot.SendMessage(id, "لغو ممکن نیست؛ مالکیت، وضعیت آگهی یا معاملهٔ در جریان را بررسی کن.", cancellationToken: ct);
             return;
@@ -1911,9 +1912,60 @@ public sealed class BotApp(TelegramBotClient bot, MarketStore store, Marketplace
         }
     }
 
+    private async Task CleanUpOldListings(CancellationToken ct)
+    {
+        market.Expire();
+        foreach (var ad in store.AllAds().Where(a => a.Status is ListingStatus.Expired or ListingStatus.Cancelled))
+            await CleanUpShares(ad, ct);
+    }
+
+    private async Task CleanUpShares(Advertisement ad, CancellationToken ct)
+    {
+        foreach (var share in store.Shares(ad.Id).Where(s => !s.CleanupCompleted))
+        {
+            try
+            {
+                if (share.GroupChatId is { } groupId && share.GroupMessageId is { } messageId)
+                {
+                    try { await bot.DeleteMessage(groupId, messageId, ct); }
+                    catch (Telegram.Bot.Exceptions.ApiRequestException ex) when (
+                        ex.Message.Contains("message to delete not found", StringComparison.OrdinalIgnoreCase)) { /* Already removed. */ }
+                    catch (Telegram.Bot.Exceptions.ApiRequestException)
+                    {
+                        // Telegram does not delete messages older than 48 hours. Keep a visibly
+                        // inactive card without buttons if the old message can still be edited.
+                        try { await bot.EditMessageText(groupId, messageId, InlineCard(ad), parseMode: ParseMode.Html, cancellationToken: ct); }
+                        catch (Telegram.Bot.Exceptions.ApiRequestException ex) when (
+                            ex.Message.Contains("message is not modified", StringComparison.OrdinalIgnoreCase) ||
+                            ex.Message.Contains("message to edit not found", StringComparison.OrdinalIgnoreCase)) { }
+                    }
+                }
+                else if (share.InlineMessageId.Length > 0)
+                {
+                    // Telegram offers no delete API for inline messages: deactivate their cards.
+                    try { await bot.EditMessageText(inlineMessageId: share.InlineMessageId,
+                        text: share.CompactInlineCard ? CompactInlineCard(ad) : InlineCard(ad), parseMode: ParseMode.Html,
+                        cancellationToken: ct); }
+                    catch (Telegram.Bot.Exceptions.ApiRequestException ex) when (
+                        ex.Message.Contains("message is not modified", StringComparison.OrdinalIgnoreCase) ||
+                        ex.Message.Contains("message to edit not found", StringComparison.OrdinalIgnoreCase)) { }
+                }
+                share.CleanupCompleted = true;
+                store.Update(share);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { Log(ex); }
+        }
+    }
+
     private async Task EditShares(int id, CancellationToken ct)
     {
         var ad = store.Ad(id)!;
+        if (ad.Status is ListingStatus.Expired or ListingStatus.Cancelled)
+        {
+            await CleanUpShares(ad, ct);
+            return;
+        }
         foreach (var share in store.Shares(id))
             try
             {

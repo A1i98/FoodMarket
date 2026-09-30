@@ -100,9 +100,11 @@ public sealed class MarketplaceTests
         var ad = new Advertisement { OwnerId = 1, Type = ListingType.Sell, FoodName = "قیمه",
             Meal = MealType.Lunch, Date = new DateOnly(2026, 9, 29) };
         market.Publish(ad);
+        store.Save(new SharedMessage { AdvertisementId = ad.Id, GroupChatId = -1001, GroupMessageId = 42 });
         clock.Now = new DateTimeOffset(2026, 9, 29, 12, 30, 0, TimeSpan.Zero); // 16:00 in Tehran
         market.Expire();
         Assert.Equal(ListingStatus.Expired, store.Ad(ad.Id)?.Status);
+        Assert.False(Assert.Single(store.Shares(ad.Id)).CleanupCompleted); // Startup cleanup still sees old shares.
         Assert.Empty(market.Search(new ParsedListingResult { OriginalText = "" }));
     }
 

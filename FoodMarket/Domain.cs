@@ -159,6 +159,7 @@ public sealed class SharedMessage
     public bool GroupSearchResult { get; set; }
     public long? GroupChatId { get; set; }
     public int? GroupMessageId { get; set; }
+    public bool CleanupCompleted { get; set; }
 }
 
 public sealed class InstalledGroup
