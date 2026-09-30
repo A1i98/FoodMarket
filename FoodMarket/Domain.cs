@@ -56,6 +56,8 @@ public sealed class MarketOptions
     public long AdminUserId { get; set; }
     public string? Socks5ProxyUrl { get; set; }
     public string DatabasePath { get; set; } = "foodmarket.db";
+    public bool AutoUpdateEnabled { get; set; }
+    public string ReleasesUrl { get; set; } = "https://github.com/A1i98/FoodMarket/releases";
     public string[] InitialCafeterias { get; set; } = ["طرشت ۳", "کاله", "سلف مرکزی"];
 }
 

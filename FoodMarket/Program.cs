@@ -3,6 +3,12 @@ using System.Net;
 using FoodMarket;
 using Telegram.Bot;
 
+if (args is ["--apply-update", var oldPid, var stagedExe, var installDirectory])
+{
+    Environment.ExitCode = await ReleaseUpdater.ApplyAsync(oldPid, stagedExe, installDirectory);
+    return;
+}
+await ReleaseUpdater.WaitForUpdateAsync();
 var options = File.Exists("appsettings.json")
     ? JsonSerializer.Deserialize<MarketOptions>(File.ReadAllText("appsettings.json"), new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new MarketOptions()
     : new MarketOptions();
@@ -55,10 +61,18 @@ using var httpClient = new HttpClient(handler, disposeHandler: false) { Timeout 
 var app = new BotApp(new TelegramBotClient(new TelegramBotClientOptions(token), httpClient), store, market, parser, options);
 using var stop = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
+var updater = options.AutoUpdateEnabled
+    ? ReleaseUpdater.RunAsync(options, proxyUrl, stop, stop.Token)
+    : Task.CompletedTask;
 try { await app.RunAsync(stop.Token); }
 catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
 catch (Exception error)
 {
     Console.Error.WriteLine(error.ToString().Replace(token, "[redacted]", StringComparison.Ordinal));
     Environment.ExitCode = 1;
+}
+finally
+{
+    await stop.CancelAsync();
+    await updater;
 }

@@ -48,6 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           dotnet publish FoodMarket/FoodMarket.csproj --configuration Release --runtime '${{ matrix.rid }}' --self-contained true -p:PublishSingleFile=true -o artifacts/publish
+          if [[ '${{ matrix.rid }}' == win-x64 ]]; then cp scripts/run-foodmarket.cmd artifacts/publish/run-foodmarket.cmd; fi
           (cd artifacts/publish && zip -q -r "../FoodMarket-${{ matrix.rid }}.zip" .)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

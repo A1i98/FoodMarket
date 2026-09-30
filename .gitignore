@@ -10,6 +10,7 @@
 *.coveragexml
 coverage/
 artifacts/
+.foodmarket-update/
 
 # Editor and operating-system files
 .vs/
